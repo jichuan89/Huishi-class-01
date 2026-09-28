@@ -19,6 +19,8 @@ scripts/__pycache__/
 __pycache__/
 scripts/.geo_cache/
 server/storage/resource-models/
+.local/
+teacher-studio-service/generated/
 
 # Editor directories and files
 

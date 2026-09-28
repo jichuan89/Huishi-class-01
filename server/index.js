@@ -7,6 +7,7 @@ import jwt from 'jsonwebtoken';
 import mysql from 'mysql2/promise';
 import { randomUUID } from 'node:crypto';
 import { mkdir, unlink, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import path from 'node:path';
 import { Readable } from 'node:stream';
@@ -56,6 +57,66 @@ const RESOURCE_MODEL_STORAGE_DIRECTORY = path.resolve(
 const FEEDBACK_ATTACHMENT_STORAGE_DIRECTORY = path.resolve(
   process.env.FEEDBACK_ATTACHMENT_STORAGE_DIR || path.join(SERVER_DIRECTORY, 'storage', 'feedback-attachments'),
 );
+const TEACHER_STUDIO_SERVICE_URL = process.env.TEACHER_STUDIO_SERVICE_URL || 'http://127.0.0.1:8765';
+const TEACHER_STUDIO_ROOT = path.resolve(
+  process.env.TEACHER_STUDIO_ROOT || path.join(SERVER_DIRECTORY, '..', 'teacher-studio-service'),
+);
+const TEACHER_STUDIO_PYTHON = process.env.TEACHER_STUDIO_PYTHON || (
+  process.platform === 'win32' ? path.resolve(path.join(SERVER_DIRECTORY, '..', '..', '.venv', 'Scripts', 'python.exe')) : 'python3'
+);
+let teacherStudioProcess;
+
+async function teacherStudioIsReady() {
+  try {
+    const response = await fetch(TEACHER_STUDIO_SERVICE_URL, { signal: AbortSignal.timeout(1200) });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function startTeacherStudioService() {
+  if (await teacherStudioIsReady()) {
+    console.log(`Teacher Studio service ready at ${TEACHER_STUDIO_SERVICE_URL}`);
+    return;
+  }
+  if (process.env.TEACHER_STUDIO_AUTOSTART === 'false') return;
+
+  const script = path.join(TEACHER_STUDIO_ROOT, 'backend', 'server.py');
+  teacherStudioProcess = spawn(TEACHER_STUDIO_PYTHON, [script], {
+    cwd: path.dirname(script),
+    env: {
+      ...process.env,
+      TEACHER_STUDIO_HOST: '127.0.0.1',
+      TEACHER_STUDIO_PORT: new URL(TEACHER_STUDIO_SERVICE_URL).port || '8765',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  teacherStudioProcess.stdout.on('data', (chunk) => process.stdout.write(`[prep] ${chunk}`));
+  teacherStudioProcess.stderr.on('data', (chunk) => process.stderr.write(`[prep] ${chunk}`));
+  teacherStudioProcess.on('error', (error) => console.error('Failed to start Teacher Studio service:', error));
+  teacherStudioProcess.on('exit', (code) => {
+    if (code && code !== 0) console.error(`Teacher Studio service exited with code ${code}`);
+    teacherStudioProcess = undefined;
+  });
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    if (await teacherStudioIsReady()) {
+      console.log(`Teacher Studio service started at ${TEACHER_STUDIO_SERVICE_URL}`);
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error(`Teacher Studio service did not become ready at ${TEACHER_STUDIO_SERVICE_URL}`);
+}
+
+function stopTeacherStudioService() {
+  if (teacherStudioProcess && !teacherStudioProcess.killed) teacherStudioProcess.kill();
+}
+
+process.once('SIGINT', () => { stopTeacherStudioService(); process.exit(0); });
+process.once('SIGTERM', () => { stopTeacherStudioService(); process.exit(0); });
+process.once('exit', stopTeacherStudioService);
 const MAX_FEEDBACK_UPLOAD_SIZE = 16 * 1024 * 1024;
 const MAX_RESOURCE_FILE_SIZE = 200 * 1024 * 1024;
 const MAX_RESOURCE_UPLOAD_SIZE = 260 * 1024 * 1024;
@@ -859,6 +920,58 @@ async function initializeDatabase() {
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true });
 });
+
+function rewriteTeacherStudioUrls(value) {
+  if (typeof value === 'string') {
+    return value.replace(/\/api\/(3d|ppt|assets)\//g, '/api/prep/$1/');
+  }
+  if (Array.isArray(value)) return value.map(rewriteTeacherStudioUrls);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, rewriteTeacherStudioUrls(item)]));
+  }
+  return value;
+}
+
+async function proxyTeacherStudioRequest(req, res) {
+  const targetPath = `/api${req.originalUrl.slice('/api/prep'.length)}`;
+  const target = `${TEACHER_STUDIO_SERVICE_URL}${targetPath}`;
+  const headers = {};
+  for (const name of ['content-type', 'content-length', 'accept']) {
+    if (req.headers[name]) headers[name] = req.headers[name];
+  }
+
+  const init = { method: req.method, headers };
+  if (!['GET', 'HEAD'].includes(req.method)) {
+    if (String(req.headers['content-type'] || '').includes('application/json')) {
+      init.body = JSON.stringify(req.body || {});
+      delete headers['content-length'];
+    } else {
+      init.body = req;
+      init.duplex = 'half';
+    }
+  }
+
+  let upstream;
+  try {
+    upstream = await fetch(target, init);
+  } catch (error) {
+    return res.status(502).json({ message: `备课生成服务不可用：${error.message}` });
+  }
+
+  const contentType = upstream.headers.get('content-type') || 'application/octet-stream';
+  res.status(upstream.status);
+  res.set('Content-Type', contentType);
+  if (contentType.includes('application/json')) {
+    const payload = rewriteTeacherStudioUrls(await upstream.json());
+    return res.json(payload);
+  }
+  const contentLength = upstream.headers.get('content-length');
+  if (contentLength) res.set('Content-Length', contentLength);
+  if (!upstream.body) return res.end();
+  return Readable.fromWeb(upstream.body).pipe(res);
+}
+
+app.use('/api/prep', requireAuth, proxyTeacherStudioRequest);
 
 registerLearningMemoryRoutes(app, {
   getPool: () => pool,
@@ -1820,7 +1933,8 @@ app.use((error, _req, res, _next) => {
   res.status(500).json({ message: '服务器错误' });
 });
 
-initializeDatabase()
+startTeacherStudioService()
+  .then(() => initializeDatabase())
   .then(() => {
     startLearningMemoryJobs(() => pool);
     httpServer.listen(PORT, () => {

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { lazy, Suspense, useEffect, useState } from 'react';
 import AdminUsers from './AdminUsers';
 import Dashboard from './Dashboard';
 import Landing, { MarketingPage } from './Landing';
@@ -7,7 +7,9 @@ import ModelGenerationStudio from './components/ModelGenerationStudio';
 import { useTheme } from './components/ThemeProvider';
 import { isThemeId } from './services/theme';
 
-type AppView = 'landing' | 'login' | 'dashboard' | 'admin' | 'model-generation';
+type AppView = 'landing' | 'login' | 'dashboard' | 'admin' | 'model-generation' | 'prep-studio';
+
+const PrepStudioPage = lazy(() => import('./prep/PrepStudioPage'));
 
 const MARKETING_ROUTES: Record<MarketingPage, string> = {
   home: '/',
@@ -174,6 +176,14 @@ export default function App() {
     );
   }
 
+  if (view === 'prep-studio' && user) {
+    return (
+      <Suspense fallback={<div className="min-h-screen bg-[#f5f7fb] grid place-items-center text-sm text-slate-600">正在打开备课工作台...</div>}>
+        <PrepStudioPage onBack={() => setView('dashboard')} />
+      </Suspense>
+    );
+  }
+
   if (view === 'dashboard' && user) {
     return (
       <Dashboard
@@ -184,6 +194,7 @@ export default function App() {
         onLogout={handleLogout}
         onUserUpdated={handleUserUpdated}
         onOpenModelGeneration={() => setView('model-generation')}
+        onOpenPrepStudio={() => setView('prep-studio')}
         onOpenAdmin={user.role === 'admin' ? () => setView('admin') : undefined}
       />
     );

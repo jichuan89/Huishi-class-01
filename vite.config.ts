@@ -23,6 +23,9 @@ export default defineConfig(({ mode }) => {
         },
       },
       plugins: [react(), tailwindcss()],
+      optimizeDeps: {
+        entries: ['index.html'],
+      },
       resolve: {
         alias: {
           '@': path.resolve(__dirname, '.'),

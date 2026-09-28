@@ -32,6 +32,23 @@ cp .env.example .env.local
 npm run dev
 ```
 
+### Windows 本地一键部署
+
+本仓库已集成教案、PPT、素材和 Blender/GLB 生成服务。在当前开发机上运行：
+
+```powershell
+& 'D:\jjr\.venv\Scripts\python.exe' 'D:\jjr\shuzhi-class\scripts\start_local.py'
+```
+
+启动器会在 `.local/mysql-data` 初始化隔离 MySQL，不修改系统已有数据库，并同时启动：
+
+- Web：`http://127.0.0.1:3000`
+- 主 API：`http://127.0.0.1:4000`
+- 备课生成服务：`http://127.0.0.1:8765`
+- 隔离 MySQL：`127.0.0.1:3307`
+
+首次启动会创建本地管理员 `admin`，初始密码为 `admin123456`。登录后从 3D 课堂顶部进入“备课与课件”，可以生成中小学或本科生物医学教案、逐页 PPT 预览、PPTX、单图/五视角模型、GLB 和 Blender 工程。
+
 启动后访问：
 
 - Web：<http://localhost:3000>

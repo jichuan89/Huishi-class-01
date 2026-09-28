@@ -197,6 +197,7 @@ interface DashboardProps {
   onLogout: () => void;
   onUserUpdated: (user: AuthUser) => void;
   onOpenModelGeneration: () => void;
+  onOpenPrepStudio: () => void;
   onOpenAdmin?: () => void;
 }
 
@@ -305,7 +306,7 @@ function compressFeedbackImage(file: File): Promise<FeedbackAttachment> {
   });
 }
 
-const App: React.FC<DashboardProps> = ({ playIntro = true, initialLocalModelId, onBack, currentUser, onLogout, onUserUpdated, onOpenModelGeneration, onOpenAdmin }) => {
+const App: React.FC<DashboardProps> = ({ playIntro = true, initialLocalModelId, onBack, currentUser, onLogout, onUserUpdated, onOpenModelGeneration, onOpenPrepStudio, onOpenAdmin }) => {
   const [modelUrl, setModelUrl] = useState<string | null>(null);
   const [modelLoadRevision, setModelLoadRevision] = useState(0);
   const [modelType, setModelType] = useState<ModelType>('glb');
@@ -2718,6 +2719,9 @@ const App: React.FC<DashboardProps> = ({ playIntro = true, initialLocalModelId, 
         </div>
 
         <div className="flex items-center gap-5">
+          <button type="button" className="lab-pill-button" onClick={onOpenPrepStudio}>
+            <BookOpenCheck className="mr-1.5 text-ink/90" size={14} /> 备课与课件
+          </button>
           <button type="button" className="lab-pill-button" onClick={onOpenModelGeneration}>
             <Sparkles className="mr-1.5 text-ink/90" size={14} /> 3D建模生成
           </button>
