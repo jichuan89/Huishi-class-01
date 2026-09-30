@@ -131,7 +131,7 @@ async function main() {
     loader.setDRACOLoader(draco);
 
     return new Promise((resolve, reject) => {
-      loader.load(glbUrl, (gltf) => {
+      loader.load(glbUrl, async (gltf) => {
         const scene = gltf.scene;
 
         // 合并所有 mesh 到一个几何体（假设单 mesh）

@@ -2205,7 +2205,7 @@ const CameraInit: React.FC<{ modelUrl: string; target: CameraTarget }> = ({ mode
     } else {
       camera.position.set(3.5, 4, 3.5);
     }
-    camera.lookAt(...target);
+    camera.lookAt(target[0], target[1], target[2]);
     controls?.update?.();
   }, [modelUrl]);
 

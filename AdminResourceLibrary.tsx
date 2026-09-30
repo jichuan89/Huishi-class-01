@@ -394,7 +394,7 @@ const AdminResourceLibrary: React.FC<AdminResourceLibraryProps> = ({ refreshKey 
                     accept=".glb,.gltf,.fbx,.bin,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tga,.ktx,.ktx2,.dds"
                     className="hidden"
                     onChange={(event) => {
-                      const files = Array.from(event.target.files || []);
+                      const files: File[] = event.target.files ? [...event.target.files] : [];
                       setModelFiles(files);
                       const primaryFile = files.find((file) => /\.(glb|gltf|fbx)$/i.test(file.name));
                       if (primaryFile && !modelName.trim()) setModelName(primaryFile.name.replace(/\.[^.]+$/, ''));

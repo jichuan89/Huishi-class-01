@@ -19,7 +19,9 @@ scripts/__pycache__/
 __pycache__/
 scripts/.geo_cache/
 server/storage/resource-models/
+server/storage/user-models/
 .local/
+.local-3d/
 teacher-studio-service/generated/
 
 # Editor directories and files

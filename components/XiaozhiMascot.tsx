@@ -69,7 +69,7 @@ const XiaozhiMascot: React.FC<XiaozhiMascotProps> = ({
   speaking,
   className = '',
   ariaLabel,
-}) => {
+}: XiaozhiMascotProps) => {
   const reduceMotion = useReducedMotion();
   const id = useId().replace(/:/g, '');
   const meta = XIAOZHI_STATE_META[state];
@@ -78,7 +78,8 @@ const XiaozhiMascot: React.FC<XiaozhiMascotProps> = ({
   const subtle = !reduceMotion && motionMode !== 'static';
   const orbitAngle = useMotionValue(ORBIT_START_DEGREES);
   const ringRotation = useMotionValue(0);
-  const orbitShouldRotate = stateful && ORBITING_STATES.has(state);
+  const visualState: XiaozhiVisualState = state;
+  const orbitShouldRotate = stateful && ORBITING_STATES.has(visualState);
   const orbitNodeX = useTransform(orbitAngle, (angle) => getOrbitPoint(angle).x);
   const orbitNodeY = useTransform(orbitAngle, (angle) => getOrbitPoint(angle).y);
   const orbitNodeBackOpacity = useTransform(orbitAngle, (angle) => (isOrbitFront(angle) ? 0 : 0.76));

@@ -430,13 +430,6 @@ export function mapActivityAction({ method = 'GET', path = '/', statusCode = 200
   if (normalizedMethod === 'POST' && normalizedPath === '/api/activity-events') {
     return actionWithFailure('activity.event.submit', statusCode);
   }
-  if (normalizedMethod === 'POST' && normalizedPath === '/api/3d/submit') {
-    return actionWithFailure('3d.job.submit', statusCode);
-  }
-  if (normalizedMethod === 'POST' && normalizedPath === '/api/3d/query') {
-    return actionWithFailure('3d.job.query', statusCode);
-  }
-  if (normalizedMethod === 'GET' && normalizedPath === '/api/3d/model') return '3d.model.view';
   if (normalizedMethod === 'POST' && normalizedPath === '/api/ai/completion') return 'ai.completion';
   if (normalizedMethod === 'POST' && normalizedPath === '/api/ai/stream') return 'ai.stream';
   if (normalizedMethod === 'POST' && normalizedPath === '/api/memory/sessions') return 'memory.session.create';

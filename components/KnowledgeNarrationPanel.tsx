@@ -39,7 +39,7 @@ const KnowledgeNarrationPanel: React.FC<KnowledgeNarrationPanelProps> = ({
       isLatinWord = false;
     };
 
-    for (const character of Array.from(content)) {
+    for (const character of [...content]) {
       const characterLength = character.length;
       const nextIsLatinWord = /[A-Za-z0-9_+%°./-]/.test(character);
       if (!text || nextIsLatinWord !== isLatinWord || !nextIsLatinWord) {

@@ -12,9 +12,7 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
-import { CommonClient } from 'tencentcloud-sdk-nodejs-common';
 import {
-  build3dSubmissionDescription,
   buildActivityLogDescription,
   buildSemanticActivityLog,
   buildLogPagination,
@@ -56,6 +54,9 @@ const RESOURCE_MODEL_STORAGE_DIRECTORY = path.resolve(
 );
 const FEEDBACK_ATTACHMENT_STORAGE_DIRECTORY = path.resolve(
   process.env.FEEDBACK_ATTACHMENT_STORAGE_DIR || path.join(SERVER_DIRECTORY, 'storage', 'feedback-attachments'),
+);
+const USER_MODEL_STORAGE_DIRECTORY = path.resolve(
+  process.env.USER_MODEL_STORAGE_DIR || path.join(SERVER_DIRECTORY, 'storage', 'user-models'),
 );
 const TEACHER_STUDIO_SERVICE_URL = process.env.TEACHER_STUDIO_SERVICE_URL || 'http://127.0.0.1:8765';
 const TEACHER_STUDIO_ROOT = path.resolve(
@@ -120,6 +121,7 @@ process.once('exit', stopTeacherStudioService);
 const MAX_FEEDBACK_UPLOAD_SIZE = 16 * 1024 * 1024;
 const MAX_RESOURCE_FILE_SIZE = 200 * 1024 * 1024;
 const MAX_RESOURCE_UPLOAD_SIZE = 260 * 1024 * 1024;
+const MAX_USER_MODEL_UPLOAD_SIZE = 75 * 1024 * 1024;
 const RESOURCE_MODEL_EXTENSIONS = new Set(['.glb', '.gltf', '.fbx']);
 const RESOURCE_ASSET_EXTENSIONS = new Set([
   ...RESOURCE_MODEL_EXTENSIONS,
@@ -648,6 +650,101 @@ async function parseFeedbackRequest(req) {
   return { body, files };
 }
 
+async function parseUserModelUpload(req, requiredFields) {
+  const contentType = String(req.headers['content-type'] || '').toLowerCase();
+  if (!contentType.startsWith('multipart/form-data')) throw httpError(415, '请使用图片表单上传');
+  const length = Number(req.headers['content-length'] || 0);
+  if (length > MAX_USER_MODEL_UPLOAD_SIZE) throw httpError(413, '图片总大小不能超过 75MB');
+  let formData;
+  try {
+    const request = new Request('http://localhost/user-model-upload', { method: 'POST', headers: { 'content-type': String(req.headers['content-type']) }, body: Readable.toWeb(req), duplex: 'half' });
+    formData = await request.formData();
+  } catch { throw httpError(400, '图片表单无法解析'); }
+  const files = {};
+  for (const field of requiredFields) {
+    const value = formData.get(field);
+    if (!value || typeof value === 'string' || typeof value.arrayBuffer !== 'function') throw httpError(400, `缺少${field}图片`);
+    if (!String(value.type || '').startsWith('image/')) throw httpError(400, `${field}必须是图片`);
+    if (!value.size || value.size > 12 * 1024 * 1024) throw httpError(413, `${field}图片不能超过 12MB`);
+    files[field] = value;
+  }
+  return files;
+}
+
+async function initializeUserModelStorage() {
+  await mkdir(USER_MODEL_STORAGE_DIRECTORY, { recursive: true });
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_model_jobs (
+      id CHAR(36) NOT NULL,
+      user_id BIGINT UNSIGNED NOT NULL,
+      mode ENUM('single','multiview') NOT NULL,
+      status ENUM('queued','processing','completed','failed') NOT NULL DEFAULT 'queued',
+      model_id CHAR(36) NULL,
+      error_message TEXT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id), KEY user_model_jobs_user_index (user_id),
+      CONSTRAINT user_model_jobs_user_fk FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_models (
+      id CHAR(36) NOT NULL,
+      user_id BIGINT UNSIGNED NOT NULL,
+      job_id CHAR(36) NOT NULL,
+      name VARCHAR(180) NOT NULL,
+      mode ENUM('single','multiview') NOT NULL,
+      status VARCHAR(32) NOT NULL,
+      manifest JSON NOT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id), UNIQUE KEY user_models_job_unique (job_id), KEY user_models_user_index (user_id),
+      CONSTRAINT user_models_user_fk FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+}
+
+async function updateUserModelJob(id, userId, patch) {
+  await pool.execute('UPDATE user_model_jobs SET status = COALESCE(:status, status), model_id = COALESCE(:modelId, model_id), error_message = :errorMessage WHERE id = :id AND user_id = :userId', { id, userId, status: patch.status || null, modelId: patch.modelId || null, errorMessage: patch.errorMessage || null });
+}
+
+function userModelUrl(id, type) { return `/api/models/${id}/files/${type}`; }
+
+async function runUserModelJob({ id, userId, mode, files }) {
+  const runDir = path.join(USER_MODEL_STORAGE_DIRECTORY, String(userId), id);
+  await mkdir(runDir, { recursive: true });
+  try {
+    const form = new FormData();
+    const sourceFiles = {};
+    for (const [field, file] of Object.entries(files)) {
+      const bytes = Buffer.from(await file.arrayBuffer());
+      const extension = { 'image/png': '.png', 'image/webp': '.webp' }[file.type] || '.jpg';
+      const sourceName = `source-${field}${extension}`;
+      await writeFile(path.join(runDir, sourceName), bytes);
+      sourceFiles[field] = { name: sourceName, type: file.type || 'image/jpeg' };
+      form.append(field, new Blob([bytes], { type: file.type }), file.name);
+    }
+    const targetPath = mode === 'single' ? '/api/3d/generate-image' : '/api/3d/generate-multiview-model';
+    await updateUserModelJob(id, userId, { status: 'processing' });
+    const upstream = await fetch(`${TEACHER_STUDIO_SERVICE_URL}${targetPath}`, { method: 'POST', body: form });
+    const payload = await upstream.json().catch(() => ({}));
+    if (!upstream.ok || !payload.glbUrl) throw new Error(payload.error || payload.message || '图像重建失败');
+    const storedFiles = {};
+    for (const [type, field, fileName] of [['glb', 'glbUrl', 'model.glb'], ['blend', 'blendUrl', 'model.blend'], ['preview', 'previewUrl', 'preview.png']]) {
+      if (!payload[field]) continue;
+      const artifact = await fetch(`${TEACHER_STUDIO_SERVICE_URL}${payload[field]}`);
+      if (!artifact.ok) throw new Error(`${type} 文件保存失败`);
+      await writeFile(path.join(runDir, fileName), Buffer.from(await artifact.arrayBuffer()));
+      storedFiles[type] = fileName;
+    }
+    const manifest = { ...payload, glbUrl: storedFiles.glb || '', blendUrl: storedFiles.blend || '', previewUrl: storedFiles.preview || '', files: storedFiles, sourceFiles, jobId: id, mode, workflow: payload.workflow || ['blender-director', 'blender-modeler', 'asset-optimization', 'export-pipeline', 'qa-review'] };
+    const modelId = randomUUID();
+    await pool.execute('INSERT INTO user_models (id, user_id, job_id, name, mode, status, manifest) VALUES (:id, :userId, :jobId, :name, :mode, :status, :manifest)', { id: modelId, userId, jobId: id, name: mode === 'single' ? '单图生成模型' : '四视图生成模型', mode, status: manifest.status || 'generated', manifest: JSON.stringify(manifest) });
+    await updateUserModelJob(id, userId, { status: 'completed', modelId });
+  } catch (error) {
+    await updateUserModelJob(id, userId, { status: 'failed', errorMessage: error instanceof Error ? error.message : '模型生成失败' });
+  }
+}
+
 async function removeStoredResourceFiles(storageNames) {
   await Promise.all(storageNames.map(async (storageName) => {
     try {
@@ -889,6 +986,24 @@ async function initializeDatabase() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `);
 
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS lesson_plans (
+      id VARCHAR(64) NOT NULL,
+      user_id BIGINT UNSIGNED NOT NULL,
+      title VARCHAR(180) NOT NULL,
+      subject VARCHAR(64) NULL,
+      grade VARCHAR(64) NULL,
+      plan_json JSON NOT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id, user_id),
+      KEY lesson_plans_user_updated_index (user_id, updated_at),
+      CONSTRAINT lesson_plans_user_fk FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+
+  await initializeUserModelStorage();
+
   await initializeResourceLibrary();
   await initializeLearningMemory(pool);
   await initializeQuizWrongBook(pool);
@@ -972,6 +1087,135 @@ async function proxyTeacherStudioRequest(req, res) {
 }
 
 app.use('/api/prep', requireAuth, proxyTeacherStudioRequest);
+
+app.post('/api/models/jobs/single-image', requireAuth, async (req, res, next) => {
+  try {
+    const files = await parseUserModelUpload(req, ['image']);
+    const id = randomUUID();
+    await pool.execute('INSERT INTO user_model_jobs (id, user_id, mode, status) VALUES (:id, :userId, "single", "queued")', { id, userId: req.user.id });
+    void runUserModelJob({ id, userId: req.user.id, mode: 'single', files });
+    return res.status(202).json({ job: { id, status: 'queued', mode: 'single' } });
+  } catch (error) { return next(error); }
+});
+
+app.post('/api/models/jobs/multiview', requireAuth, async (req, res, next) => {
+  try {
+    const files = await parseUserModelUpload(req, ['front', 'left', 'right', 'back']);
+    const id = randomUUID();
+    await pool.execute('INSERT INTO user_model_jobs (id, user_id, mode, status) VALUES (:id, :userId, "multiview", "queued")', { id, userId: req.user.id });
+    void runUserModelJob({ id, userId: req.user.id, mode: 'multiview', files });
+    return res.status(202).json({ job: { id, status: 'queued', mode: 'multiview' } });
+  } catch (error) { return next(error); }
+});
+
+function parseModelManifest(value) {
+  if (!value) return {};
+  if (typeof value === 'object') return value;
+  try { return JSON.parse(value); } catch { return {}; }
+}
+
+function privateModelPayload(row) {
+  const manifest = parseModelManifest(row.manifest);
+  return {
+    id: row.id,
+    name: row.name,
+    mode: row.mode,
+    status: row.status,
+    editable: Boolean(manifest.editable),
+    message: manifest.message || '',
+    parts: Array.isArray(manifest.parts) ? manifest.parts : [],
+    segmentation: manifest.segmentation || null,
+    separation: manifest.separation || null,
+    workflow: manifest.workflow || [],
+    engine: manifest.engine || 'offline-visual-hull',
+    qualityTier: manifest.qualityTier || 'basic',
+    paidApi: false,
+    warnings: Array.isArray(manifest.warnings) ? manifest.warnings : [],
+    glbUrl: manifest.glbUrl ? userModelUrl(row.id, 'glb') : '',
+    blendUrl: manifest.blendUrl ? userModelUrl(row.id, 'blend') : '',
+    previewUrl: manifest.previewUrl ? userModelUrl(row.id, 'preview') : '',
+    createdAt: row.created_at,
+  };
+}
+
+app.get('/api/models/jobs/:id', requireAuth, async (req, res) => {
+  const [rows] = await pool.execute('SELECT * FROM user_model_jobs WHERE id = :id AND user_id = :userId LIMIT 1', { id: req.params.id, userId: req.user.id });
+  const job = rows[0];
+  if (!job) return res.status(404).json({ message: '建模任务不存在' });
+  let model = null;
+  if (job.model_id) {
+    const [models] = await pool.execute('SELECT * FROM user_models WHERE id = :id AND user_id = :userId LIMIT 1', { id: job.model_id, userId: req.user.id });
+    if (models[0]) model = privateModelPayload(models[0]);
+  }
+  return res.json({ job: { id: job.id, mode: job.mode, status: job.status, error: job.error_message || '', createdAt: job.created_at, updatedAt: job.updated_at }, model });
+});
+
+app.get('/api/models/:id', requireAuth, async (req, res) => {
+  const [rows] = await pool.execute('SELECT * FROM user_models WHERE id = :id AND user_id = :userId LIMIT 1', { id: req.params.id, userId: req.user.id });
+  if (!rows[0]) return res.status(404).json({ message: '模型不存在' });
+  return res.json({ model: privateModelPayload(rows[0]) });
+});
+
+app.get('/api/models/:id/files/:type', requireAuth, async (req, res) => {
+  const [rows] = await pool.execute('SELECT * FROM user_models WHERE id = :id AND user_id = :userId LIMIT 1', { id: req.params.id, userId: req.user.id });
+  if (!rows[0]) return res.status(404).json({ message: '模型文件不存在' });
+  const manifest = parseModelManifest(rows[0].manifest);
+  const fileName = manifest.files?.[req.params.type] || manifest[{ glb: 'glbUrl', blend: 'blendUrl', preview: 'previewUrl' }[req.params.type]];
+  if (!fileName || path.basename(fileName) !== fileName) return res.status(404).json({ message: '模型文件不存在' });
+  const localPath = path.join(USER_MODEL_STORAGE_DIRECTORY, String(req.user.id), rows[0].job_id, fileName);
+  const mimeType = { glb: 'model/gltf-binary', blend: 'application/octet-stream', preview: 'image/png' }[req.params.type];
+  if (!mimeType) return res.status(404).json({ message: '模型文件类型无效' });
+  res.type(mimeType); res.set('Content-Disposition', `inline; filename="${path.basename(fileName)}"`);
+  return res.sendFile(localPath, (error) => { if (error && !res.headersSent) res.status(error.statusCode || 404).json({ message: '模型文件不存在' }); });
+});
+
+app.post('/api/models/:id/reprocess', requireAuth, async (req, res) => {
+  const [rows] = await pool.execute('SELECT * FROM user_models WHERE id = :id AND user_id = :userId LIMIT 1', { id: req.params.id, userId: req.user.id });
+  if (!rows[0]) return res.status(404).json({ message: '模型不存在' });
+  const manifest = parseModelManifest(rows[0].manifest);
+  const entries = Object.entries(manifest.sourceFiles || {});
+  if (entries.length === 0) return res.status(409).json({ message: '旧模型未保留参考图，无法自动重新处理。' });
+  const files = {};
+  for (const [field, source] of entries) {
+    const sourcePath = path.join(USER_MODEL_STORAGE_DIRECTORY, String(req.user.id), rows[0].job_id, path.basename(source.name));
+    files[field] = { name: source.name, type: source.type, arrayBuffer: async () => (await import('node:fs/promises')).readFile(sourcePath) };
+  }
+  const id = randomUUID();
+  await pool.execute('INSERT INTO user_model_jobs (id, user_id, mode, status) VALUES (:id, :userId, :mode, "queued")', { id, userId: req.user.id, mode: rows[0].mode });
+  void runUserModelJob({ id, userId: req.user.id, mode: rows[0].mode, files });
+  return res.status(202).json({ job: { id, status: 'queued', mode: rows[0].mode } });
+});
+
+app.get('/api/lesson-plans', requireAuth, async (req, res) => {
+  const [rows] = await pool.execute('SELECT id, title, subject, grade, plan_json, updated_at FROM lesson_plans WHERE user_id = :userId ORDER BY updated_at DESC LIMIT 100', { userId: req.user.id });
+  return res.json({ records: rows.map((row) => ({ id: row.id, title: row.title, subject: row.subject, grade: row.grade, updatedAt: row.updated_at, plan: parseModelManifest(row.plan_json) })) });
+});
+
+app.post('/api/lesson-plans', requireAuth, async (req, res) => {
+  const plan = req.body?.plan;
+  if (!plan || typeof plan !== 'object') return res.status(400).json({ message: '教案内容无效' });
+  const id = String(plan.id || randomUUID()).slice(0, 64);
+  await pool.execute(`INSERT INTO lesson_plans (id, user_id, title, subject, grade, plan_json) VALUES (:id,:userId,:title,:subject,:grade,:plan) ON DUPLICATE KEY UPDATE title=VALUES(title),subject=VALUES(subject),grade=VALUES(grade),plan_json=VALUES(plan_json)`, { id, userId: req.user.id, title: String(plan.title || '未命名教案').slice(0, 180), subject: String(plan.request?.subject || '').slice(0, 64), grade: String(plan.request?.grade || '').slice(0, 64), plan: JSON.stringify(plan) });
+  return res.status(201).json({ id });
+});
+
+app.post('/api/lesson-plans/import-local', requireAuth, async (req, res) => {
+  const records = Array.isArray(req.body?.records) ? req.body.records.slice(0, 50) : [];
+  let imported = 0;
+  for (const item of records) {
+    const plan = item?.plan;
+    if (!plan || typeof plan !== 'object') continue;
+    const id = String(plan.id || item.id || randomUUID()).slice(0, 64);
+    await pool.execute(`INSERT IGNORE INTO lesson_plans (id,user_id,title,subject,grade,plan_json) VALUES (:id,:userId,:title,:subject,:grade,:plan)`, { id, userId: req.user.id, title: String(plan.title || item.title || '未命名教案').slice(0,180), subject: String(plan.request?.subject || item.subject || '').slice(0,64), grade: String(plan.request?.grade || item.grade || '').slice(0,64), plan: JSON.stringify(plan) });
+    imported += 1;
+  }
+  return res.json({ imported });
+});
+
+app.delete('/api/lesson-plans/:id', requireAuth, async (req, res) => {
+  await pool.execute('DELETE FROM lesson_plans WHERE id = :id AND user_id = :userId', { id: req.params.id, userId: req.user.id });
+  return res.status(204).end();
+});
 
 registerLearningMemoryRoutes(app, {
   getPool: () => pool,
@@ -1771,124 +2015,6 @@ app.delete('/api/admin/resource-models/:id', requireAuth, requireAdmin, async (r
   await pool.execute('DELETE FROM resource_models WHERE id = :id', { id });
   await removeStoredResourceFiles(fileRows.map((file) => file.storage_name));
   return res.json({ ok: true });
-});
-
-const AI3D_ENDPOINT = 'ai3d.tencentcloudapi.com';
-const AI3D_API_VERSION = '2025-05-13';
-const AI3D_MODEL_HOSTS = [
-  '.cos.ap-guangzhou.tencentcos.cn',
-  '.cos.ap-guangzhou.myqcloud.com',
-];
-
-function get3dGenerationClient() {
-  const secretId = process.env.AI3D_SECRET_ID || process.env.TENCENTCLOUD_SECRET_ID;
-  const secretKey = process.env.AI3D_SECRET_KEY || process.env.TENCENTCLOUD_SECRET_KEY;
-
-  if (!secretId || !secretKey) {
-    throw new Error('缺少 3D 建模服务凭证，请配置 AI3D_SECRET_ID 和 AI3D_SECRET_KEY');
-  }
-
-  return new CommonClient(AI3D_ENDPOINT, AI3D_API_VERSION, {
-    credential: { secretId, secretKey },
-    region: process.env.AI3D_REGION || process.env.TENCENTCLOUD_REGION || 'ap-guangzhou',
-    profile: {
-      signMethod: 'TC3-HMAC-SHA256',
-      httpProfile: {
-        reqMethod: 'POST',
-        reqTimeout: 60,
-        endpoint: AI3D_ENDPOINT,
-      },
-    },
-  });
-}
-
-function generationError(error) {
-  return {
-    Error: {
-      Code: error?.code || 'InternalError',
-      Message: error?.message || '自研 3D 模型服务调用失败',
-    },
-    RequestId: error?.requestId || '',
-  };
-}
-
-app.post('/api/3d/submit', requireAuth, async (req, res) => {
-  try {
-    const input = req.body || {};
-    const params = { ResultFormat: input.ResultFormat || 'GLB' };
-
-    const prompt = typeof input.Prompt === 'string' ? input.Prompt.trim() : String(input.Prompt || '').trim();
-    const hasImageBase64 = typeof input.ImageBase64 === 'string' && input.ImageBase64.length > 0;
-    const hasImageUrl = typeof input.ImageUrl === 'string' && input.ImageUrl.length > 0;
-
-    if (prompt) {
-      params.Prompt = prompt;
-      req.activityLogDescription = build3dSubmissionDescription({ prompt });
-    } else if (hasImageBase64 || hasImageUrl) {
-      req.activityLogDescription = build3dSubmissionDescription({ image: true });
-    }
-    if (input.ImageBase64) params.ImageBase64 = input.ImageBase64;
-    if (input.ImageUrl) params.ImageUrl = input.ImageUrl;
-    if (typeof input.EnablePBR === 'boolean') params.EnablePBR = input.EnablePBR;
-    if (typeof input.EnableGeometry === 'boolean') params.EnableGeometry = input.EnableGeometry;
-
-    if (!params.Prompt && !params.ImageBase64 && !params.ImageUrl) {
-      return res.status(400).json({ message: '请输入提示词或上传图片' });
-    }
-
-    const data = await get3dGenerationClient().request('SubmitHunyuanTo3DRapidJob', params);
-    return res.json({ Response: data });
-  } catch (error) {
-    console.error('3D generation submit failed:', error);
-    return res.status(500).json({ Response: generationError(error) });
-  }
-});
-
-app.post('/api/3d/query', requireAuth, async (req, res) => {
-  const jobId = String(req.body?.JobId || '').trim();
-  if (!jobId) return res.status(400).json({ message: '缺少任务编号' });
-
-  try {
-    const data = await get3dGenerationClient().request('QueryHunyuanTo3DRapidJob', { JobId: jobId });
-    return res.json({ Response: data });
-  } catch (error) {
-    console.error('3D generation query failed:', error);
-    return res.status(500).json({ Response: generationError(error) });
-  }
-});
-
-app.get('/api/3d/model', requireAuth, async (req, res) => {
-  let modelUrl;
-  try {
-    modelUrl = new URL(String(req.query.url || ''));
-  } catch {
-    return res.status(400).json({ message: '模型地址无效' });
-  }
-
-  const allowed = modelUrl.protocol === 'https:' && AI3D_MODEL_HOSTS.some((host) => modelUrl.hostname.endsWith(host));
-  if (!allowed) return res.status(403).json({ message: '不允许访问该模型地址' });
-
-  try {
-    const upstream = await fetch(modelUrl, {
-      cache: 'no-store',
-      headers: req.headers.range ? { Range: String(req.headers.range) } : undefined,
-    });
-    if (!upstream.ok) return res.status(upstream.status).json({ message: `模型文件获取失败 (${upstream.status})` });
-    if (!upstream.body) return res.status(502).json({ message: '模型存储服务未返回文件内容' });
-    res.set({
-      'Content-Type': upstream.headers.get('content-type') || 'model/gltf-binary',
-      'Cache-Control': 'private, max-age=3600',
-      ...(upstream.headers.get('content-length') ? { 'Content-Length': upstream.headers.get('content-length') } : {}),
-      ...(upstream.headers.get('content-range') ? { 'Content-Range': upstream.headers.get('content-range') } : {}),
-      ...(upstream.headers.get('accept-ranges') ? { 'Accept-Ranges': upstream.headers.get('accept-ranges') } : {}),
-    });
-    res.status(upstream.status);
-    return Readable.fromWeb(upstream.body).pipe(res);
-  } catch (error) {
-    console.error('3D model proxy failed:', error);
-    if (res.headersSent) return res.end();
-    return res.status(502).json({ message: '无法连接模型存储服务' });
-  }
 });
 
 const volcTtsService = createVolcTtsService();

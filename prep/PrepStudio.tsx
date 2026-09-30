@@ -44,11 +44,11 @@ type RecordItem = { id: string; title: string; subject: string; grade: string; u
 type BusyState = 'preview' | 'ppt' | '3d' | 'bundle' | null
 type ModelOptions = { textureResolution: string; foregroundRatio: string; vertexCount: string; removeBackground: boolean }
 type ModelMode = 'single' | 'multiview'
-type ModelViews = Partial<Record<'front' | 'top' | 'left' | 'right' | 'bottom', File>>
+type ModelViews = Partial<Record<'front' | 'left' | 'right' | 'back', File>>
 type ImageModelResult = { status: string; editable: boolean; message: string; glbUrl: string; blendUrl: string; previewUrl: string; parts: { name: string; partKey: string; source: string }[] }
 
 const initialForm: FormState = {
-  stage: '高中', grade: '高一', subject: '数学', topic: '函数的单调性', lessonType: '新授课', duration: '45', classSize: '40人',
+  stage: '高中', grade: '高一', subject: '数学', topic: '', lessonType: '新授课', duration: '45', classSize: '40人',
   textbookVersion: '人教A版', chapter: '第三章 函数的概念与性质', unitPosition: '单元核心概念课', teachingScene: '日常课堂',
   learningSituation: '学生已经接触过函数图像与坐标系，但对“变化趋势”的语言表达还不够稳定。',
   priorKnowledge: '函数图像、定义域、坐标系中的点与变化趋势',
@@ -64,6 +64,11 @@ const initialForm: FormState = {
   visualBalance: '图文均衡', teachingRhythm: '互动型', answerReveal: '包含', speakerNotes: '包含', highlightExam: '突出', use3d: '按需使用',
   field: '生物医学', courseName: '人体解剖学与生理学', semester: '大一上', courseType: '专业核心课', credits: '2', courseHours: '32',
   prerequisites: '', learningOutcomes: '', assessmentMethod: '', includeCase: '包含', includeExperiment: '包含', includeResearch: '不包含',
+}
+
+const highSchoolSample: FormState = {
+  ...initialForm,
+  topic: '函数的单调性',
 }
 
 const undergraduateDefaults: Partial<FormState> = {
@@ -86,9 +91,11 @@ const recordKey = 'teacher-studio.records.v1'
 
 type PrepStudioProps = {
   onBack: () => void
+  embedded?: boolean
+  onApplyLesson?: (lesson: LessonPlan, modelUrl?: string) => void
 }
 
-function PrepStudio({ onBack }: PrepStudioProps) {
+function PrepStudio({ onBack, embedded = false, onApplyLesson }: PrepStudioProps) {
   const [view, setView] = useState<'new' | 'records' | 'knowledge'>('new')
   const [form, setForm] = useState<FormState>(initialForm)
   const [plan, setPlan] = useState<LessonPlan | null>(null)
@@ -104,6 +111,7 @@ function PrepStudio({ onBack }: PrepStudioProps) {
   const schoolForm = useRef(initialForm)
   const [threeDConfigured, setThreeDConfigured] = useState<boolean | null>(null)
   const [prepStep, setPrepStep] = useState<1 | 2 | 3 | 4>(1)
+  const [showFullForm, setShowFullForm] = useState(false)
   const updatePlan = (next: LessonPlan) => {
     if (JSON.stringify(next.modelPlan) !== JSON.stringify(plan?.modelPlan) || next.id !== plan?.id) {
       setBioResult(null); setModelUrl(''); setArtifacts({}); setPptArtifact(null)
@@ -111,8 +119,26 @@ function PrepStudio({ onBack }: PrepStudioProps) {
     setPlan(next)
   }
 
-  useEffect(() => { try { setRecords(JSON.parse(localStorage.getItem(recordKey) || '[]')) } catch { setRecords([]) } }, [])
-  useEffect(() => { fetch('/api/prep/3d/status').then((response) => response.json()).then((data) => setThreeDConfigured(Boolean(data.configured))).catch(() => setThreeDConfigured(false)) }, [])
+  useEffect(() => {
+    let cancelled = false
+    const load = async () => {
+      let legacy: RecordItem[] = []
+      try { legacy = JSON.parse(localStorage.getItem(recordKey) || '[]') } catch { legacy = [] }
+      try {
+        if (legacy.length && localStorage.getItem(`${recordKey}.migrated`) !== '1') {
+          const migration = await fetch('/api/lesson-plans/import-local', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ records: legacy }) })
+          if (migration.ok) localStorage.setItem(`${recordKey}.migrated`, '1')
+        }
+        const response = await fetch('/api/lesson-plans', { credentials: 'include' })
+        const data = await response.json()
+        if (!response.ok) throw new Error(data.message || '教案记录读取失败')
+        if (!cancelled) setRecords(data.records || [])
+      } catch { if (!cancelled) setRecords(legacy) }
+    }
+    void load()
+    return () => { cancelled = true }
+  }, [])
+  useEffect(() => { fetch('/api/prep/3d/status').then((response) => response.json()).then((data) => setThreeDConfigured(data.provider === 'local' && data.blenderAvailable !== false)).catch(() => setThreeDConfigured(false)) }, [])
   useEffect(() => { if (toast) { const timer = window.setTimeout(() => setToast(''), 2600); return () => window.clearTimeout(timer) } }, [toast])
   const update = (key: keyof FormState, value: string) => setForm((current) => {
     if (key === 'stage' && value === '本科' && current.stage !== '本科') {
@@ -123,7 +149,7 @@ function PrepStudio({ onBack }: PrepStudioProps) {
     if (current.stage === '本科' && (key === 'objectives' || key === 'learningOutcomes')) return { ...current, objectives: value, learningOutcomes: value }
     return { ...current, [key]: value }
   })
-  const sample = () => { setForm(form.stage === '本科' ? { ...initialForm, ...undergraduateDefaults } : initialForm); setPlan(null); setBioResult(null); setArtifacts({}); setPptArtifact(null); setToast(form.stage === '本科' ? '已载入本科心脏示例' : '已载入高中数学示例') }
+  const sample = () => { setForm(form.stage === '本科' ? { ...initialForm, ...undergraduateDefaults } : highSchoolSample); setPlan(null); setShowFullForm(false); setBioResult(null); setArtifacts({}); setPptArtifact(null); setToast(form.stage === '本科' ? '已载入本科心脏示例' : '已载入高中数学示例') }
   const selectMaterial = async (file: File | null) => {
     if (!file) return
     if (file.size > 15 * 1024 * 1024) { setToast('资料文件不能超过 15 MB'); return }
@@ -141,14 +167,18 @@ function PrepStudio({ onBack }: PrepStudioProps) {
     try {
       const response = await fetch('/api/prep/lesson/preview', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formToPayload(form)) })
       const data = await response.json(); if (!response.ok) throw new Error(data.error || '生成失败')
-      setPlan({ ...data.lessonPlan, request: { ...form } }); setBioResult(null); setArtifacts({}); setPptArtifact(null); setModelUrl(''); setToast('教案已生成，可继续修改或备案')
+      setPlan({ ...data.lessonPlan, request: { ...form } }); setShowFullForm(false); setBioResult(null); setArtifacts({}); setPptArtifact(null); setModelUrl(''); setToast('教案已生成，可继续修改或备案')
     } catch (error) { setToast(error instanceof Error ? error.message : '生成失败，请确认本地 API 已启动') } finally { setBusy(null) }
   }
-  const saveRecord = () => {
+  const saveRecord = async () => {
     if (!plan) return
     const item: RecordItem = { id: plan.id, title: plan.title, subject: plan.request.subject, grade: plan.request.grade, updatedAt: new Date().toISOString(), plan }
     const next = [item, ...records.filter((record) => record.id !== item.id)].slice(0, 30)
-    setRecords(next); localStorage.setItem(recordKey, JSON.stringify(next)); setToast('已保存到本地备案')
+    try {
+      const response = await fetch('/api/lesson-plans', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ plan }) })
+      const data = await response.json().catch(() => ({})); if (!response.ok) throw new Error(data.message || '教案保存失败')
+      setRecords(next); setToast('已保存到当前账户')
+    } catch (error) { setToast(error instanceof Error ? error.message : '教案保存失败') }
   }
   const triggerDownload = (url: string, fileName: string) => { const link = document.createElement('a'); link.href = url; link.download = fileName; document.body.appendChild(link); link.click(); link.remove() }
   const requestPpt = async () => {
@@ -165,8 +195,8 @@ function PrepStudio({ onBack }: PrepStudioProps) {
       if (!file) throw new Error('请先上传一张图片')
       body.append('image', file)
     } else {
-      for (const view of ['front', 'top', 'left', 'right', 'bottom'] as const) {
-        if (!views[view]) throw new Error(`请补齐${view === 'front' ? '正面' : view === 'top' ? '上面' : view === 'left' ? '左侧' : view === 'right' ? '右侧' : '底部'}图`)
+      for (const view of ['front', 'left', 'right', 'back'] as const) {
+        if (!views[view]) throw new Error(`请补齐${view === 'front' ? '正面' : view === 'left' ? '左侧' : view === 'right' ? '右侧' : '背面'}图`)
         body.append(view, views[view]!)
       }
     }
@@ -216,7 +246,7 @@ function PrepStudio({ onBack }: PrepStudioProps) {
       return
     }
     if (mode === 'single' && !file) { setToast('请先上传一张用于建模的 PNG 或 JPG 图片'); return }
-    if (mode === 'multiview' && ['front', 'top', 'left', 'right', 'bottom'].some((key) => !views[key as keyof ModelViews])) { setToast('请先补齐五个视角图片'); return }
+    if (mode === 'multiview' && ['front', 'left', 'right', 'back'].some((key) => !views[key as keyof ModelViews])) { setToast('请先补齐四个视角图片'); return }
     setBusy('3d')
     try {
       const result = await requestImageModel(mode, file, views, options)
@@ -249,12 +279,12 @@ function PrepStudio({ onBack }: PrepStudioProps) {
     setToast(pptOk && modelOk ? (threeDConfigured ? 'PPTX 和 3D 模型都已生成' : 'PPTX 和本地演示模型都已生成') : `组合生成完成：${pptOk ? 'PPT 成功' : 'PPT 失败'}，${modelOk ? '3D 成功' : '3D 失败'}`)
     setBusy(null)
   }
-  const openRecord = (item: RecordItem) => { setForm({ ...initialForm, ...item.plan.request }); updatePlan({ ...item.plan, request: { ...initialForm, ...item.plan.request } }); setView('new'); setToast('已打开备案记录') }
-  const deleteRecord = (id: string) => { const next = records.filter((record) => record.id !== id); setRecords(next); localStorage.setItem(recordKey, JSON.stringify(next)); setToast('备案已删除') }
+  const openRecord = (item: RecordItem) => { setForm({ ...initialForm, ...item.plan.request }); updatePlan({ ...item.plan, request: { ...initialForm, ...item.plan.request } }); setShowFullForm(false); setView('new'); setToast('已打开备案记录') }
+  const deleteRecord = async (id: string) => { const response = await fetch(`/api/lesson-plans/${encodeURIComponent(id)}`, { method: 'DELETE', credentials: 'include' }); if (!response.ok) { setToast('备案删除失败'); return }; setRecords((current) => current.filter((record) => record.id !== id)); setToast('备案已删除') }
   const filteredRecords = useMemo(() => records.filter((record) => `${record.title}${record.subject}${record.grade}`.toLowerCase().includes(query.toLowerCase())), [records, query])
 
-  return <div className="app-shell">
-    <aside className="sidebar">
+  return <div className={`app-shell ${embedded ? 'is-integrated' : ''} ${plan && !showFullForm ? 'has-plan' : 'is-input'}`}>
+    {!embedded && <aside className="sidebar">
       <div className="brand"><div className="brand-mark"><Layers3 size={18} /></div><div><strong>数智备课</strong><span>教案 · PPT · 3D</span></div></div>
       <div className="side-section-label">工作空间</div>
       <nav className="nav-list">
@@ -264,14 +294,14 @@ function PrepStudio({ onBack }: PrepStudioProps) {
       </nav>
       <button className="nav-item prep-back" type="button" onClick={onBack}><ArrowLeft size={17} />返回 3D 课堂</button>
       <div className="sidebar-bottom"><div className="status-dot" /><div><strong>本地工作模式</strong><span>内容保存在当前浏览器</span></div></div>
-    </aside>
+    </aside>}
     <main className="main-area">
-      <header className="topbar"><div><div className="eyebrow">TEACHER WORKSPACE / 01</div><h1>{view === 'new' ? '新建教案' : view === 'records' ? '备案记录' : '知识库'}</h1></div><div className="top-actions"><span className="saved-state"><Check size={15} /> 自动保存已开启</span><button className="avatar">林</button></div></header>
+      <header className="topbar"><div className="topbar-left"><button className="nav-item integrated-back" style={{display:'none'}} type="button" onClick={onBack}><ArrowLeft size={17} />课堂</button><div className="topbar-title"><div className="eyebrow">TEACHER WORKSPACE / 01</div><h1>{view === 'new' ? '智能备课' : view === 'records' ? '备案记录' : '知识库'}</h1>{view === 'new' && <span className="topbar-context">{form.topic || '未命名课程'}</span>}</div></div><div className="top-actions"><span className="saved-state"><Check size={15} /> 自动保存已开启</span>{plan && onApplyLesson && <button className="primary-btn" onClick={() => onApplyLesson(plan, modelUrl || undefined)}><MonitorPlay size={15} />应用到课堂</button>}<button className="avatar">林</button></div></header>
       {view === 'new' && <>
-        <div className="stepper"><div className="step done"><span>01</span><div><strong>教学需求</strong><small>结构化输入</small></div></div><div className="step-line done" /><div className={plan ? 'step done' : 'step current'}><span>02</span><div><strong>教案预览</strong><small>编辑与备案</small></div></div><div className="step-line" /><div className="step"><span>03</span><div><strong>PPT 生成</strong><small>可编辑课件</small></div></div></div>
-        <div className="workspace-grid">
+        <div className={`workspace-grid ${plan && !showFullForm ? 'has-plan' : 'is-input'}`}>
           <section className="form-panel">
-            <div className="panel-heading"><div><span className="section-kicker">INPUT</span><h2>教学需求</h2><p>把一节课的关键约束写清楚，生成内容会更贴近课堂。</p></div><button className="ghost-btn" onClick={sample}><Sparkles size={15} />载入示例</button></div>
+            {plan && !showFullForm && <QuickSummary plan={plan} form={form} onEdit={() => setShowFullForm(true)} onStep={(step) => { setShowFullForm(true); setPrepStep(step) }} />}
+            <div className="panel-heading"><div><span className="section-kicker">COURSE BLUEPRINT</span><h2>课程蓝图</h2><p>把一节课的关键约束写清楚，生成内容会更贴近课堂。</p></div><button className="ghost-btn" onClick={sample}><Sparkles size={15} />载入示例</button></div>
             <div className="prep-nav" aria-label="备课步骤">
               {([[1, '课程信息', '课题与教材'], [2, '教材学情', '资料与基础'], [3, '教学侧重', '目标与考点'], [4, '课件设置', '版式与节奏']] as const).map(([step, title, note]) => <button key={step} className={prepStep === step ? 'prep-step active' : 'prep-step'} onClick={() => setPrepStep(step)}><span>{String(step).padStart(2, '0')}</span><div><strong>{title}</strong><small>{note}</small></div></button>)}
             </div>
@@ -306,10 +336,10 @@ function PrepStudio({ onBack }: PrepStudioProps) {
               <div className="ppt-summary"><MonitorPlay size={22} /><div><strong>{form.pptTheme === '自动推荐' ? `${form.stage}${form.subject}推荐主题` : form.pptTheme}</strong><span>{form.pptLength}内容 · {form.visualBalance} · {form.teachingRhythm} · 原生可编辑课件</span></div></div>
             </div>}
             <div className="stage-controls"><button className="outline-btn" disabled={prepStep === 1} onClick={() => setPrepStep((prepStep - 1) as 1 | 2 | 3 | 4)}>上一步</button>{prepStep < 4 && <button className="primary-btn" onClick={() => setPrepStep((prepStep + 1) as 1 | 2 | 3 | 4)}>下一步 <ArrowRight size={15} /></button>}</div>
-            <div className="form-footer"><span><Lightbulb size={15} />生成内容来自本地模板，通常 1 秒内完成</span><button className="primary-btn" onClick={generatePlan} disabled={busy === 'preview'}>{busy === 'preview' ? <LoaderCircle className="spin" size={17} /> : <WandSparkles size={17} />}生成教案 <ArrowRight size={16} /></button></div>
+            <div className="form-footer"><span><Lightbulb size={15} />本地生成 · 可继续编辑</span><button className="primary-btn" onClick={generatePlan} disabled={busy === 'preview'}>{busy === 'preview' ? <LoaderCircle className="spin" size={17} /> : <WandSparkles size={17} />}生成教案 <ArrowRight size={16} /></button></div>
           </section>
           <aside className="preview-column">
-            {!plan ? <EmptyPreview /> : <Fragment key={plan.id}><LessonPreview plan={plan} onUpdate={updatePlan} onSave={saveRecord} onGenerate={generatePpt} onGenerate3d={generate3d} onGenerateBundle={generateBundle} onRegenerate={generatePlan} busy={busy} modelFile={modelFile} setModelFile={setModelFile} modelUrl={modelUrl} threeDConfigured={threeDConfigured} bioResult={bioResult} artifacts={artifacts} pptArtifact={pptArtifact} /></Fragment>}
+            {!plan ? <EmptyPreview form={form} /> : <Fragment key={plan.id}><LessonPreview plan={plan} onUpdate={updatePlan} onSave={saveRecord} onGenerate={generatePpt} onGenerate3d={generate3d} onGenerateBundle={generateBundle} onRegenerate={generatePlan} busy={busy} modelFile={modelFile} setModelFile={setModelFile} modelUrl={modelUrl} threeDConfigured={threeDConfigured} bioResult={bioResult} artifacts={artifacts} pptArtifact={pptArtifact} /></Fragment>}
           </aside>
         </div>
       </>}
@@ -326,7 +356,14 @@ function SelectField({ label, value, options, onChange }: { label: string; value
 function SegmentField({ label, value, options, onChange }: { label: string; value: string; options: string[]; onChange: (value: string) => void }) { return <div className="field"><span>{label}</span><div className="segment-group">{options.map((option) => <button key={option} type="button" className={value === option ? 'active' : ''} onClick={() => onChange(option)}>{option}</button>)}</div></div> }
 function ToggleField({ label, note, value, onChange }: { label: string; note: string; value: string; onChange: (value: string) => void }) { return <label className="toggle-field"><input type="checkbox" checked={value !== '不包含' && value !== '不突出' && value !== '不使用'} onChange={(event) => onChange(event.target.checked ? (label === '突出考点易错点' ? '突出' : label === '编入 3D 教学' ? '按需使用' : '包含') : (label === '突出考点易错点' ? '不突出' : label === '编入 3D 教学' ? '不使用' : '不包含'))} /><span><strong>{label}</strong><small>{note}</small></span></label> }
 
-function EmptyPreview() { return <div className="empty-preview"><div className="empty-icon"><ClipboardList size={25} /></div><h3>教案预览会出现在这里</h3><p>先填写左侧教学需求，生成后可以逐段编辑、备案，并一键制作课件。</p><div className="empty-points"><span><Check size={14} />课堂问题链</span><span><Check size={14} />教学型 PPT 大纲</span><span><Check size={14} />本地备案记录</span></div></div> }
+function QuickSummary({ plan, form, onEdit, onStep }: { plan: LessonPlan; form: FormState; onEdit: () => void; onStep: (step: 1 | 2 | 3 | 4) => void }) {
+  return <div className="quick-summary"><div className="quick-summary-head"><div><span className="section-kicker">LESSON / READY</span><h2>本课已生成</h2><p>{plan.title}</p></div><span className="status-chip"><Check size={13} />已生成</span></div><div className="quick-summary-tags"><span>{form.stage}</span><span>{form.grade}</span><span>{form.subject}</span></div><div className="quick-summary-meta"><div><small>课时</small><strong>{form.duration} 分钟</strong></div><div><small>课型</small><strong>{form.lessonType}</strong></div><div><small>场景</small><strong>{form.teachingScene}</strong></div></div><div className="quick-summary-section"><span>快速修改</span><button type="button" onClick={() => onStep(1)}>课程信息 <ArrowRight size={14} /></button><button type="button" onClick={() => onStep(2)}>教材与学情 <ArrowRight size={14} /></button><button type="button" onClick={() => onStep(3)}>教学主线 <ArrowRight size={14} /></button><button type="button" onClick={() => onStep(4)}>课件设置 <ArrowRight size={14} /></button></div><button type="button" className="primary-btn quick-summary-edit" onClick={onEdit}><FileText size={15} />继续编辑课程蓝图</button></div>
+}
+
+function EmptyPreview({ form }: { form: FormState }) {
+  const filled = [form.topic, form.objectives, form.keyPoints, form.resources, form.assessment].filter(Boolean).length
+  return <div className="empty-preview"><div className="empty-preview-kicker"><div className="empty-icon"><ClipboardList size={22} /></div><span>LIVE COURSE BRIEF</span></div><div className="empty-preview-title"><div><h3>本课蓝图</h3><p>{form.topic || '等待填写课题'}</p></div><span className="draft-state">未生成</span></div><div className="brief-tags"><span>{form.stage}</span><span>{form.grade}</span><span>{form.subject}</span></div><div className="brief-grid"><div><small>课时</small><strong>{form.duration} 分钟</strong></div><div><small>课型</small><strong>{form.lessonType}</strong></div><div><small>场景</small><strong>{form.teachingScene}</strong></div><div><small>已完成</small><strong>{filled} / 5 项</strong></div></div><div className="empty-points"><span><Check size={14} />课堂问题链</span><span><Check size={14} />教学型 PPT 大纲</span><span><Check size={14} />本地备案记录</span></div><p className="empty-preview-note">完成左侧课程蓝图后，这里会切换为可编辑教案与课件工作区。</p></div>
+}
 
 function SlideGallery({ draft, previews, quality, selected, setSelected, editing, changeSlide, moveSlide, duplicateSlide, deleteSlide, regenerateSlide, slideBusy }: { draft: LessonPlan; previews: SlidePreview[]; quality: QualityReport | null; selected: number; setSelected: (index: number) => void; editing: boolean; changeSlide: (index: number, key: keyof SlidePlan, value: string) => void; moveSlide: (index: number, direction: -1 | 1) => void; duplicateSlide: (index: number) => void; deleteSlide: (index: number) => void; regenerateSlide: (layout?: string) => void; slideBusy: boolean }) {
   const [assets, setAssets] = useState<AssetCandidate[]>([])
@@ -496,17 +533,17 @@ function ModelPanel({ file, setFile, modelUrl, options, setOptions, configured, 
   const [views, setViews] = useState<ModelViews>({})
   const [result, setResult] = useState<ImageModelResult | null>(null)
   const update = (key: keyof ModelOptions, value: string | boolean) => setOptions({ ...options, [key]: value })
-  const viewLabels = { front: '正面图', top: '上面图', left: '左侧图', right: '右侧图', bottom: '底部图' } as const
+  const viewLabels = { front: '正面图', left: '左侧图', right: '右侧图', back: '背面图' } as const
   const viewKeys = Object.keys(viewLabels) as (keyof ModelViews)[]
   const submit = async () => { const generated = await onGenerate(file, options, mode, views); if (generated && 'parts' in generated) setResult(generated as ImageModelResult) }
   return <section className="model-panel">
-    <div className="model-panel-head"><div><span className="section-kicker">3D ASSET</span><h3><Box size={16} />课堂三维模型</h3><p>上传课件中的物体图片，生成可旋转的 GLB 模型。</p></div><span className={configured ? 'model-status ready' : 'model-status'}>{configured === null ? '检测中' : configured ? '服务已配置' : '待配置'}</span></div>
-    {configured === false && <div className="model-warning"><Settings2 size={15} />当前未配置真实重建服务；单图和多视角都可以先用本地预览验证流程。配置 <code>SF3D_BASE_URL</code>、<code>SF3D_API_KEY</code> 后才会调用真实重建。</div>}
-    <div className="model-mode-switch" role="tablist" aria-label="3D生成模式"><button type="button" className={mode === 'single' ? 'active' : ''} onClick={() => setMode('single')}>单张图片生成</button><button type="button" className={mode === 'multiview' ? 'active' : ''} onClick={() => setMode('multiview')}>五视角重建</button></div>
+    <div className="model-panel-head"><div><span className="section-kicker">CLASSROOM ASSET</span><h3><Box size={16} />本课教学资产</h3><p>把可观察的 3D 结构接入本课教案、PPT 和课堂活动。</p></div><span className={configured ? 'model-status ready' : 'model-status'}>{configured === null ? '检测中' : configured ? '本地引擎就绪' : '本地引擎不可用'}</span></div>
+    {configured === false && <div className="model-warning"><Settings2 size={15} />未检测到本地 Blender 或建模服务，请先启动本机后端。</div>}
+    <div className="model-mode-switch" role="tablist" aria-label="3D生成模式"><button type="button" className={mode === 'single' ? 'active' : ''} onClick={() => setMode('single')}>单张图片生成</button><button type="button" className={mode === 'multiview' ? 'active' : ''} onClick={() => setMode('multiview')}>四视图重建</button></div>
     {mode === 'single' ? <label className="upload-box"><UploadCloud size={18} /><span>{file ? file.name : '选择一张 PNG / JPG 图片'}</span><small>{file ? `${Math.ceil(file.size / 1024)} KB · 已就绪` : '适合快速生成整体模型'}</small><input type="file" accept="image/png,image/jpeg" onChange={(event) => setFile(event.target.files?.[0] || null)} /></label> : <div className="multiview-grid">{viewKeys.map((key) => <label className={views[key] ? 'view-upload ready' : 'view-upload'} key={key}><UploadCloud size={15} /><strong>{viewLabels[key]}</strong><small>{views[key]?.name || '选择图片'}</small><input type="file" accept="image/png,image/jpeg" onChange={(event) => setViews((current) => ({ ...current, [key]: event.target.files?.[0] || undefined }))} /></label>)}</div>}
-    {mode === 'multiview' && <p className="model-hint">请保持五张图的主体、比例和背景一致。真实服务会用五个视角重建，输出后仍会进行 Blender 部件拆分。</p>}
+    {mode === 'multiview' && <p className="model-hint">请保持四张图的主体、比例和背景一致。真实服务会用正面、左侧、右侧和背面重建，输出后继续进行 Blender 部件拆分。</p>}
     <div className="model-controls"><label className="field"><span>贴图分辨率</span><select value={options.textureResolution} onChange={(event) => update('textureResolution', event.target.value)}><option>512</option><option>768</option><option>1024</option><option>1536</option><option>2048</option></select></label><label className="field"><span>前景占比</span><input type="number" min="0.5" max="1" step="0.05" value={options.foregroundRatio} onChange={(event) => update('foregroundRatio', event.target.value)} /></label><label className="field"><span>目标顶点数</span><input type="number" step="1" value={options.vertexCount} onChange={(event) => update('vertexCount', event.target.value)} /></label><label className="model-check"><input type="checkbox" checked={options.removeBackground} onChange={(event) => update('removeBackground', event.target.checked)} />自动移除背景</label></div>
-    <div className="model-actions"><button className="primary-btn model-generate" onClick={submit} disabled={busy !== null || disabled || (mode === 'single' ? !file : viewKeys.some((key) => !views[key]))}>{busy === '3d' ? <LoaderCircle className="spin" size={15} /> : <Box size={15} />}{mode === 'single' ? '生成单图模型' : '生成五视角模型'}</button></div>
+    <div className="model-actions"><button className="primary-btn model-generate" onClick={submit} disabled={busy !== null || disabled || (mode === 'single' ? !file : viewKeys.some((key) => !views[key]))}>{busy === '3d' ? <LoaderCircle className="spin" size={15} /> : <Box size={15} />}{mode === 'single' ? '生成本课 3D 教学资产' : '生成本课四视图资产'}</button></div>
     {modelUrl ? <><div className="model-result"><model-viewer src={modelUrl} camera-controls auto-rotate shadow-intensity="1" exposure="1" environment-image="neutral" /><div className="image-model-downloads"><a className="model-download" href={modelUrl} download="lesson-model.glb"><Download size={15} />GLB</a>{result?.blendUrl && <a className="model-download" href={result.blendUrl} download><Download size={15} />Blender 工程</a>}{result?.previewUrl && <a className="model-download" href={result.previewUrl} download><Download size={15} />预览图</a>}</div></div>{result && <div className="part-summary"><strong>可拆分部件 · {result.parts.length}</strong><div>{result.parts.slice(0, 12).map((part) => <span key={part.partKey}>{part.name}</span>)}</div>{result.parts.length > 12 && <small>另有 {result.parts.length - 12} 个部件</small>}</div>}</> : <div className="model-empty"><Box size={22} /><span>生成后将在这里预览模型</span></div>}
   </section>
 }

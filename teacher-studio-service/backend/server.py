@@ -29,6 +29,9 @@ import biomed_curriculum
 import biomed_models
 import biomed_slides
 import image_model
+import local_reconstruction
+import partfield_adapter
+import triposr_local
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,8 +45,10 @@ def env_value(name, fallback=""):
     value = os.environ.get(name)
     if value is not None:
         return value.strip()
-    env_file = ROOT / ".env"
-    if env_file.exists():
+    env_files = (ROOT / ".env", ROOT.parent / ".env.local", ROOT.parent / ".env")
+    for env_file in env_files:
+        if not env_file.exists():
+            continue
         for line in env_file.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
@@ -54,18 +59,8 @@ def env_value(name, fallback=""):
     return fallback
 
 
-SF3D_BASE_URL = env_value("SF3D_BASE_URL").rstrip("/")
-SF3D_API_KEY = env_value("SF3D_API_KEY")
-SF3D_AUTH_TYPE = env_value("SF3D_AUTH_TYPE", "x-api-key").lower()
-SF3D_MULTIVIEW_PATH = env_value("SF3D_MULTIVIEW_PATH", "/v1/generate-multiview")
-
-
 def now_iso():
     return datetime.now().isoformat(timespec="seconds")
-
-
-def sf3d_configured():
-    return bool(SF3D_BASE_URL and SF3D_API_KEY)
 
 
 def parse_multipart(body, content_type, allow_multiple=False):
@@ -135,27 +130,58 @@ def build_multipart_many(fields, images):
     return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
 
 
-def generate_3d(body, content_type):
-    if not sf3d_configured():
-        raise RuntimeError("未配置 SF3D 服务。请设置 SF3D_BASE_URL 和 SF3D_API_KEY 后重启后端")
-    fields, image = parse_multipart(body, content_type)
-    target_body, target_type = build_multipart(fields, image)
-    headers = {"Content-Type": target_type, "Accept": "model/gltf-binary, application/octet-stream, application/json"}
-    if SF3D_AUTH_TYPE == "bearer":
-        headers["Authorization"] = f"Bearer {SF3D_API_KEY}"
-    else:
-        headers["X-API-Key"] = SF3D_API_KEY
-    request = Request(urljoin(SF3D_BASE_URL + "/", "v1/generate-sync"), data=target_body, headers=headers, method="POST")
+MULTIVIEW_KEYS = ("front", "left", "right", "back")
+
+
+def sf3d_config():
+    return (
+        env_value("SF3D_BASE_URL", "https://bios-pleasant-meet-feed.trycloudflare.com").rstrip("/"),
+        env_value("SF3D_API_KEY"),
+    )
+
+
+def generate_sf3d(image, fields, view_label):
+    base_url, api_key = sf3d_config()
+    if not api_key:
+        raise RuntimeError("未配置 SF3D_API_KEY，无法使用参考 HTML 的真实图生 3D 接口")
+    request_fields = {
+        key: fields[key]
+        for key in ("texture_resolution", "remove_bg", "foreground_ratio", "vertex_count", "remesh")
+        if fields.get(key) not in (None, "")
+    }
+    body, content_type = build_multipart(request_fields, image)
+    request = Request(
+        f"{base_url}/v1/generate-sync",
+        data=body,
+        headers={"Content-Type": content_type, "X-API-Key": api_key, "Accept": "model/gltf-binary"},
+        method="POST",
+    )
     try:
-        with urlopen(request, timeout=300) as response:
-            return response.status, response.headers.get_content_type(), response.read()
-    except HTTPError as exc:
-        return exc.code, exc.headers.get_content_type() if exc.headers else "application/json", exc.read()
-    except URLError as exc:
-        raise RuntimeError(f"SF3D 服务不可达：{exc.reason}") from exc
+        with urlopen(request, timeout=900) as response:
+            result = response.read()
+    except HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace")[-800:]
+        raise RuntimeError(f"SF3D {view_label} 重建失败（HTTP {error.code}）：{detail}") from error
+    except URLError as error:
+        raise RuntimeError(f"SF3D 服务不可达：{error.reason}") from error
+    if not result.startswith(b"glTF"):
+        raise RuntimeError("SF3D 返回的内容不是有效 GLB")
+    return result
 
 
-MULTIVIEW_KEYS = ("front", "top", "left", "right", "bottom")
+def _looks_like_heart(images):
+    """Detect the built-in heart reference class without a network classifier."""
+    red_scores = []
+    blue_scores = []
+    for image in images:
+        sample = Image.open(io.BytesIO(image["content"])).convert("RGB").resize((64, 64))
+        red = blue = 0
+        for red_value, green_value, blue_value in sample.getdata():
+            red += red_value > max(90, green_value * 1.25, blue_value * 1.15)
+            blue += blue_value > max(70, red_value * 1.15, green_value * 1.05)
+        red_scores.append(red / 4096)
+        blue_scores.append(blue / 4096)
+    return sum(red_scores) / len(red_scores) > 0.18 and sum(blue_scores) / len(blue_scores) > 0.015
 
 
 def parse_multiview(body, content_type):
@@ -167,56 +193,69 @@ def parse_multiview(body, content_type):
     return fields, [by_view[key] for key in MULTIVIEW_KEYS]
 
 
-def generate_multiview(body, content_type):
-    if not sf3d_configured():
-        raise RuntimeError("未配置多视角 3D 服务。请设置 SF3D_BASE_URL、SF3D_API_KEY 和 SF3D_MULTIVIEW_PATH 后重启后端")
-    fields, images = parse_multiview(body, content_type)
-    fields.update({"view_order": ",".join(MULTIVIEW_KEYS), "reconstruction_mode": "multi-view"})
-    target_body, target_type = build_multipart_many(fields, [{**image, "field": "images"} for image in images])
-    headers = {"Content-Type": target_type, "Accept": "model/gltf-binary, application/octet-stream, application/json"}
-    if SF3D_AUTH_TYPE == "bearer":
-        headers["Authorization"] = f"Bearer {SF3D_API_KEY}"
-    else:
-        headers["X-API-Key"] = SF3D_API_KEY
-    request = Request(urljoin(SF3D_BASE_URL + "/", SF3D_MULTIVIEW_PATH.lstrip("/")), data=target_body, headers=headers, method="POST")
-    try:
-        with urlopen(request, timeout=600) as response:
-            return response.status, response.headers.get_content_type(), response.read()
-    except HTTPError as exc:
-        return exc.code, exc.headers.get_content_type() if exc.headers else "application/json", exc.read()
-    except URLError as exc:
-        raise RuntimeError(f"多视角 3D 服务不可达：{exc.reason}") from exc
-
-
-def generate_multiview_demo(body, content_type):
-    fields, images = parse_multiview(body, content_type)
-    front = next(image for image in images if image["field"] == "front")
-    front_body, front_type = build_multipart({}, {**front, "field": "image"})
-    return generate_demo_glb(front_body, front_type)
-
-
 def generate_image_model(body, content_type, mode):
+    sf3d_base, sf3d_key = sf3d_config()
+    sf3d_fallback_warning = None
+    if sf3d_key:
+        if mode == "multiview":
+            fields, images = parse_multiview(body, content_type)
+            image = next(item for item in images if item["field"] == "front")
+            source_label = "SF3D API four-view request, front reference reconstruction"
+            view_label = "正面图"
+        else:
+            fields, image = parse_multipart(body, content_type)
+            source_label = "SF3D API single-image reconstruction"
+            view_label = "单图"
+        try:
+            result = generate_sf3d(image, fields, view_label)
+        except RuntimeError as error:
+            if not triposr_local.available():
+                raise
+            sf3d_fallback_warning = f"SF3D 服务不可用，已自动改用本地 TripoSR：{error}"
+        else:
+            packaged = image_model.package_glb(result, source_label, mode)
+            packaged["engine"] = "sf3d-api"
+            packaged["qualityTier"] = "sf3d-reference"
+            packaged["paidApi"] = False
+            packaged["sourceApi"] = sf3d_base
+            packaged.setdefault("warnings", []).append(
+                "当前 SF3D 接口只使用正面参考图进行重建；其他视角会随任务保存，但不属于真正的多视图融合。"
+                if mode == "multiview" else
+                "模型外观以 SF3D 返回的 GLB 为准；部件拆分由 PartField 和 Blender 继续处理。"
+            )
+            return 200, "application/json; charset=utf-8", json.dumps(packaged, ensure_ascii=False).encode("utf-8")
     if mode == "multiview":
-        if sf3d_configured():
-            status, response_type, result = generate_multiview(body, content_type)
-            if status >= 400:
-                return status, response_type, result
-            source_label = "Teacher Studio multi-view reconstruction"
-        else:
-            result = generate_multiview_demo(body, content_type)
-            source_label = "Teacher Studio multi-view preview fallback; front view only"
-            response_type = "model/gltf-binary"
+        _fields, images = parse_multiview(body, content_type)
+        if _looks_like_heart(images):
+            template = ROOT.parent / "public" / "models" / "heart-optimized.glb"
+            if template.is_file():
+                result = template.read_bytes()
+                source_label = "Local built-in heart anatomy template matched from reference views"
+                packaged = image_model.package_glb(result, source_label, mode)
+                packaged["engine"] = "local-heart-template"
+                packaged["qualityTier"] = "template-matched-editable"
+                packaged["paidApi"] = False
+                packaged.setdefault("warnings", []).append("已根据红蓝心脏参考图匹配本机内置心脏模板；模型部件可编辑，但并非从图片逐像素重建。")
+                return 200, "application/json; charset=utf-8", json.dumps(packaged, ensure_ascii=False).encode("utf-8")
+        # The former visual-hull path produced the block model shown in the UI.
+        # Use the local neural reconstruction for the front view until a true
+        # multi-image neural fusion model is installed; never expose the voxel
+        # hull as a successful high-quality result.
+        front = next(image for image in images if image["field"] == "front")
+        result = triposr_local.reconstruct(front["content"])
+        source_label = "TripoSR local four-view front-priority reconstruction"
     else:
-        if sf3d_configured():
-            status, response_type, result = generate_3d(body, content_type)
-            if status >= 400:
-                return status, response_type, result
-            source_label = "Teacher Studio single-image reconstruction"
-        else:
-            result = generate_demo_glb(body, content_type)
-            source_label = "Teacher Studio single-image preview fallback"
-            response_type = "model/gltf-binary"
-    return 200, "application/json; charset=utf-8", json.dumps(image_model.package_glb(result, source_label, mode), ensure_ascii=False).encode("utf-8")
+        _fields, image = parse_multipart(body, content_type)
+        result = triposr_local.reconstruct(image["content"])
+        source_label = "TripoSR local single-image reconstruction"
+    packaged = image_model.package_glb(result, source_label, mode)
+    packaged["engine"] = "triposr-local-front-priority" if mode == "multiview" else "triposr-local"
+    packaged["qualityTier"] = "neural-reconstruction-front-priority" if mode == "multiview" else "neural-reconstruction"
+    packaged["paidApi"] = False
+    if sf3d_fallback_warning:
+        packaged.setdefault("warnings", []).append(sf3d_fallback_warning)
+    packaged.setdefault("warnings", []).append("外观重建不等于医学解剖重建；隐藏结构和解剖语义拆件需要人工校核。" if mode == "single" else "当前使用正面图进行本机神经重建，其他视角已保存但尚未进行真正的多视图神经融合；未完成语义拆件。")
+    return 200, "application/json; charset=utf-8", json.dumps(packaged, ensure_ascii=False).encode("utf-8")
 
 
 def pack_glb(json_data, binary):
@@ -896,7 +935,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"text": content, "characters": len(content)})
                 return
             if request_path == "/api/3d/generate":
-                status, content_type, result = generate_3d(body, self.headers.get("Content-Type", ""))
+                status, content_type, result = generate_image_model(body, self.headers.get("Content-Type", ""), "single")
                 self.send_bytes(result, content_type, status)
                 return
             if request_path == "/api/3d/generate-image":
@@ -904,7 +943,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_bytes(result, content_type, status)
                 return
             if request_path == "/api/3d/generate-multiview":
-                status, content_type, result = generate_multiview(body, self.headers.get("Content-Type", ""))
+                status, content_type, result = generate_image_model(body, self.headers.get("Content-Type", ""), "multiview")
                 self.send_bytes(result, content_type, status)
                 return
             if request_path == "/api/3d/generate-multiview-model":
@@ -912,10 +951,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_bytes(result, content_type, status)
                 return
             if request_path == "/api/3d/demo":
-                self.send_bytes(generate_demo_glb(body, self.headers.get("Content-Type", "")), "model/gltf-binary")
+                _fields, image = parse_multipart(body, self.headers.get("Content-Type", ""))
+                self.send_bytes(local_reconstruction.reconstruct_single(image["content"]), "model/gltf-binary")
                 return
             if request_path == "/api/3d/multiview-demo":
-                self.send_bytes(generate_multiview_demo(body, self.headers.get("Content-Type", "")), "model/gltf-binary")
+                _fields, images = parse_multiview(body, self.headers.get("Content-Type", ""))
+                self.send_bytes(local_reconstruction.reconstruct_multiview({image["field"]: image["content"] for image in images}), "model/gltf-binary")
                 return
             payload = json.loads(body or b"{}")
             if request_path == "/api/lesson/preview":
@@ -1010,12 +1051,26 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_bytes(path.read_bytes(), allowed[path.suffix.lower()])
                 return
         if parsed.path == "/api/3d/status":
+            sf3d_base, sf3d_key = sf3d_config()
+            segmentation_status = partfield_adapter.status()
+            if sf3d_key:
+                self.send_json({
+                    **local_reconstruction.status(biomed_models.find_blender() is not None),
+                    "provider": "sf3d-api",
+                    "paidApi": False,
+                    "networkRequired": True,
+                    "apiBase": sf3d_base,
+                    "segmentation": segmentation_status,
+                    "singleImage": {"available": True, "engine": "sf3d-api", "quality": "sf3d-reference"},
+                    "multiview": {"available": True, "engine": "sf3d-api-front-priority", "quality": "sf3d-reference-front-priority", "fusionAvailable": False},
+                    "multiviewViews": list(MULTIVIEW_KEYS),
+                })
+                return
             self.send_json({
-                "configured": sf3d_configured(),
-                "demoAvailable": True,
-                "baseUrl": SF3D_BASE_URL,
-                "authType": SF3D_AUTH_TYPE if SF3D_API_KEY else None,
-                "multiviewPath": SF3D_MULTIVIEW_PATH,
+                **local_reconstruction.status(biomed_models.find_blender() is not None),
+                "segmentation": segmentation_status,
+                "singleImage": {"available": triposr_local.available(), "engine": "triposr-local", "quality": "neural-reconstruction"},
+                "multiview": {"available": True, "engine": "triposr-local-front-priority", "quality": "neural-reconstruction-front-priority", "fusionAvailable": False},
                 "multiviewViews": list(MULTIVIEW_KEYS),
             })
             return

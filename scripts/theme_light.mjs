@@ -4,7 +4,7 @@ import { readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { basename, extname, join } from 'node:path';
 
 const ROOT = process.cwd();
-const SKIP_FILES = new Set(['ModelGenerationStudio.tsx', 'ProceduralTerrain.tsx', 'ProceduralEarth.tsx']);
+const SKIP_FILES = new Set(['ProceduralTerrain.tsx', 'ProceduralEarth.tsx']);
 const SKIP_DIRS = new Set(['node_modules', 'dist', 'output', 'scripts', '.git']);
 const EXTS = new Set(['.tsx', '.ts']);
 

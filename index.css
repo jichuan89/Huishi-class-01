@@ -2072,3 +2072,339 @@ html, body {
   from { opacity: 0; transform: translateY(10px); }
   to { opacity: 1; transform: translateY(0); }
 }
+/* Main-page lesson and modeling workspaces */
+.lab-integrated-workspace {
+  grid-column: 1 / -1;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+  border: 1px solid rgba(var(--theme-accent-rgb), .14);
+  border-radius: 20px;
+  background: #111315;
+}
+.lab-integrated-workspace.prep-integrated-shell {
+  border-color: rgba(var(--theme-accent-rgb), .16);
+  border-radius: 20px;
+  background: linear-gradient(180deg, rgba(var(--theme-bg-soft-rgb, 4, 16, 41), .96), rgba(var(--theme-bg-rgb), .98));
+}
+.prep-integrated-shell .integrated-prep-host { display: block; width: 100%; height: 100%; min-height: 0; }
+
+.integrated-modeling {
+  display: grid;
+  grid-template-columns: 350px minmax(0, 1fr) 270px;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  color: #f3f5f7;
+  background: #111315;
+}
+.modeling-controls,.modeling-parts { min-height: 0; overflow-y: auto; background: #202224; }
+.modeling-controls { padding: 18px; border-right: 1px solid #303337; }
+.modeling-controls-head,.modeling-stage-toolbar,.parts-head,.modeling-stage-toolbar>div { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+.modeling-back,.modeling-stage-toolbar button,.parts-head button { display:inline-flex; align-items:center; gap:5px; border:1px solid #3a3e43; border-radius:6px; padding:7px 10px; color:#cfd5da; background:#292c2f; font-size:12px; }
+.modeling-status { display:flex; align-items:center; gap:7px; color:#9ca6ad; font-size:11px; }
+.modeling-status i { width:7px; height:7px; border-radius:50%; background:#35d07f; box-shadow:0 0 8px #35d07f; }
+.modeling-title { padding:24px 0 18px; }
+.modeling-title h1 { margin:6px 0; font-size:28px; font-weight:900; }
+.modeling-title p { color:#91999f; font-size:13px; line-height:1.6; }
+.modeling-title .eyebrow,.parts-head .eyebrow { color:#55b9ff; font-size:10px; font-weight:800; }
+.modeling-tabs { display:grid; grid-template-columns:1fr 1fr; padding:4px; border-radius:7px; background:#303235; }
+.modeling-tabs button { height:38px; border-radius:5px; color:#aeb5ba; font-size:14px; font-weight:700; }
+.modeling-tabs button.active { color:#fff; background:#494c50; box-shadow:inset 0 1px rgba(255,255,255,.08); }
+.single-drop { display:flex; min-height:190px; margin-top:18px; flex-direction:column; align-items:center; justify-content:center; gap:9px; border:1px dashed #555b60; border-radius:7px; color:#55b9ff; cursor:pointer; background:#191b1d; }
+.single-drop small,.view-slot small { max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#737b81; font-size:10px; }
+.single-drop input,.view-slot input { display:none; }
+.view-upload-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:18px; }
+.view-slot { display:flex; min-width:0; height:112px; padding:12px; flex-direction:column; align-items:center; justify-content:center; gap:7px; border:1px dashed #555b60; border-radius:7px; background:#191b1d; cursor:pointer; color:#aab2b7; }
+.view-slot.ready { border-color:#3ba7f5; background:#17232c; color:#5dbdff; }
+.modeling-options { display:grid; gap:12px; margin-top:18px; }
+.modeling-options label { display:grid; gap:7px; color:#bec5ca; font-size:12px; font-weight:700; }
+.modeling-options select { height:40px; border:1px solid #3a3e43; border-radius:6px; padding:0 10px; color:#e4e8eb; background:#2a2d30; }
+.modeling-local-note { margin-top:12px; color:#8b969d; font-size:11px; line-height:1.55; }
+.modeling-generate,.use-model { display:flex; width:100%; min-height:48px; margin-top:18px; align-items:center; justify-content:center; gap:8px; border-radius:7px; color:#07121a; background:#60c8ef; font-weight:900; }
+.modeling-generate:disabled { opacity:.5; cursor:wait; }
+.modeling-error,.separation-note.warn { margin-top:12px; padding:10px; border:1px solid rgba(255,110,90,.35); border-radius:6px; color:#ffaaa0; background:rgba(120,30,20,.18); font-size:12px; line-height:1.5; }
+.modeling-pipeline { display:grid; gap:8px; margin-top:18px; color:#626a70; font-size:11px; }
+.modeling-pipeline span.active { color:#62c7f1; }
+.modeling-stage { position:relative; min-width:0; min-height:0; overflow:hidden; background:#111315; }
+.modeling-stage-toolbar { position:absolute; z-index:5; top:16px; left:18px; right:18px; color:#cfd4d8; font-size:12px; }
+.modeling-stage-toolbar>span { display:flex; align-items:center; gap:7px; font-weight:800; }
+.modeling-preview-canvas { width:100%; height:100%; }
+.modeling-empty { display:flex; height:100%; flex-direction:column; align-items:center; justify-content:center; gap:12px; color:#464d52; }
+.modeling-empty strong { color:#737b81; }
+.modeling-axis { position:absolute; top:68px; right:22px; display:grid; grid-template-columns:repeat(3,28px); place-items:center; width:86px; height:42px; border-radius:22px; background:#313437; font-size:10px; }
+.modeling-axis b:nth-child(1){color:#49da91}.modeling-axis b:nth-child(2){color:#57aaff}.modeling-axis b:nth-child(3){color:#ff6c6c}
+.modeling-parts { padding:18px; border-left:1px solid #303337; }
+.parts-head h2 { margin-top:4px; font-size:18px; font-weight:900; }
+.parts-empty { margin-top:22px; padding:18px 4px; color:#777f85; font-size:12px; line-height:1.7; }
+.separation-note { margin-top:18px; padding:10px; border-radius:6px; font-size:11px; line-height:1.5; }
+.separation-note.good { border:1px solid rgba(53,208,127,.3); color:#75dea7; background:rgba(20,110,65,.16); }
+.parts-list { display:grid; gap:6px; margin-top:14px; }
+.parts-list>div { display:grid; grid-template-columns:minmax(0,1fr) 34px 46px; gap:4px; padding:4px; border:1px solid #34383c; border-radius:6px; background:#272a2d; }
+.parts-list>div.selected { border-color:#45aeea; background:#20313b; }
+.parts-list button { min-width:0; padding:7px; border-radius:4px; color:#c7cdd1; text-align:left; }
+.parts-list button:hover { background:#32373b; }
+.parts-list button:first-child { display:flex; align-items:center; justify-content:space-between; gap:6px; }
+.parts-list button b { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:11px; }
+.parts-list button small { color:#747d83; font-size:9px; }
+.parts-list button:not(:first-child) { display:grid; place-items:center; padding:0; font-size:10px; }
+.artifact-list { display:grid; gap:7px; margin-top:18px; }
+.artifact-list a { display:flex; align-items:center; gap:8px; padding:10px; border:1px solid #3b4044; border-radius:6px; color:#b8c3ca; background:#292c2f; font-size:12px; }
+.sf3d-workbench .modeling-controls { padding:18px; }
+.sf3d-workbench .modeling-title { padding:20px 0 14px; }
+.sf3d-workbench .modeling-title h1 { font-size:25px; }
+.sf3d-card { margin-bottom:12px; padding:13px; border:1px solid #34383c; border-radius:8px; background:#181b1e; }
+.sf3d-card h2 { display:flex; align-items:center; gap:8px; margin:0 0 12px; color:#aeb7be; font-size:11px; font-weight:800; }
+.sf3d-card h2 span { display:grid; width:22px; height:22px; place-items:center; border:1px solid #3c7d9d; border-radius:5px; color:#65c8ef; font-size:9px; }
+.sf3d-card>label,.sf3d-parameter-grid label { display:grid; gap:5px; color:#8f989f; font-size:10px; }
+.sf3d-card input,.sf3d-card select { width:100%; min-width:0; height:34px; padding:0 9px; border:1px solid #393e43; border-radius:6px; color:#dce3e8; background:#25292c; font:inherit; }
+.sf3d-card input[readonly] { overflow:hidden; color:#8fa4b2; text-overflow:ellipsis; }
+.sf3d-service-state { display:grid; grid-template-columns:18px minmax(0,1fr) auto; align-items:center; gap:7px; margin-top:9px; color:#64d7a7; font-size:10px; }
+.sf3d-service-state b { color:#80909a; font-size:9px; font-weight:700; }
+.sf3d-workbench .modeling-tabs { margin:0 0 10px; }
+.sf3d-workbench .single-drop { min-height:112px; margin-top:0; }
+.sf3d-parameter-grid { display:grid; grid-template-columns:1fr 1fr; gap:9px; margin-top:11px; }
+.sf3d-parameter-grid .sf3d-checkbox { display:flex; min-height:34px; grid-column:1/-1; flex-direction:row; align-items:center; gap:8px; }
+.sf3d-parameter-grid .sf3d-checkbox input { width:14px; height:14px; margin:0; accent-color:#5bc7ee; }
+.sf3d-workbench .modeling-generate { margin-top:12px; }
+.sf3d-result-column { display:grid; min-height:0; grid-template-rows:auto minmax(0,1fr) auto 170px; }
+.sf3d-result-column .modeling-preview-canvas { min-height:0; }
+.sf3d-result-meta { display:flex; flex-wrap:wrap; gap:8px; padding:10px 14px; border-top:1px solid #2b2f33; background:#151719; }
+.sf3d-result-meta span { display:inline-flex; align-items:center; gap:5px; padding:5px 8px; border:1px solid #34434b; border-radius:5px; color:#a9bdc8; font-size:10px; }
+.sf3d-result-meta span:first-child { color:#62d6ac; }
+.sf3d-log { min-height:0; padding:12px 14px; border-top:1px solid #303337; background:#0a0c10; }
+.sf3d-log h3 { margin:0 0 8px; color:#aab3ba; font-size:11px; }
+.sf3d-log>div { height:112px; overflow:auto; font-family:Consolas,monospace; }
+.sf3d-log p { display:flex; gap:9px; margin:0 0 6px; color:#bdc8d0; font-size:10px; line-height:1.4; }
+.sf3d-log time { color:#4e7e98; }
+.modeling-status.ready i { background:#4ee09b; box-shadow:0 0 8px #4ee09b; }
+.spin { animation: modeling-spin .8s linear infinite; } @keyframes modeling-spin { to { transform:rotate(360deg); } }
+@media (max-width: 1100px) { .integrated-modeling { grid-template-columns:310px minmax(0,1fr); }.modeling-parts { position:absolute; z-index:8; right:12px; top:70px; width:240px; max-height:calc(100% - 90px); border:1px solid #3a3e43; border-radius:7px; box-shadow:0 18px 50px #0009; } }
+@media (max-width: 760px) {
+  .integrated-modeling {
+    display: flex;
+    height: 100%;
+    min-width: 0;
+    flex-direction: column;
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+  .modeling-controls {
+    flex: 0 0 auto;
+    min-height: auto;
+    overflow: visible;
+    border-right: 0;
+    border-bottom: 1px solid #303337;
+  }
+  .modeling-stage {
+    flex: 0 0 65vh;
+    min-height: 420px;
+  }
+  .modeling-parts {
+    position: static;
+    width: auto;
+    max-height: none;
+    flex: 0 0 auto;
+    overflow: visible;
+    border-top: 1px solid #303337;
+    border-left: 0;
+  }
+  .view-upload-grid { grid-template-columns:1fr 1fr; }
+}
+
+/* PartField modeling workbench */
+.integrated-modeling.sf3d-workbench {
+  grid-template-columns: 300px minmax(0, 1fr) 280px;
+  grid-template-rows: minmax(0, 1fr);
+  position: relative;
+  overflow: hidden;
+  background: #101214;
+}
+.sf3d-workbench .modeling-controls,
+.sf3d-workbench .modeling-parts {
+  background: #1f2326;
+}
+.sf3d-workbench .modeling-controls {
+  width: 300px;
+  box-sizing: border-box;
+  padding: 16px;
+}
+.sf3d-workbench .modeling-parts {
+  width: 280px;
+  box-sizing: border-box;
+  padding: 16px;
+}
+.sf3d-workbench .modeling-title h1 {
+  font-size: 24px;
+}
+.sf3d-workbench .modeling-title p {
+  margin: 0;
+}
+.partfield-license {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 4px 8px;
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid rgba(245, 158, 11, .35);
+  border-radius: 6px;
+  background: rgba(80, 55, 18, .22);
+  color: #f3c56f;
+  font-size: 11px;
+  line-height: 1.45;
+}
+.partfield-license.ready {
+  border-color: rgba(81, 196, 146, .34);
+  background: rgba(23, 84, 62, .2);
+  color: #82e1b7;
+}
+.partfield-license svg {
+  grid-row: span 2;
+  margin-top: 1px;
+}
+.partfield-license span {
+  min-width: 0;
+  font-weight: 800;
+}
+.partfield-license small {
+  min-width: 0;
+  color: #aeb7bd;
+}
+.sf3d-workbench .single-drop {
+  min-height: 118px;
+}
+.sf3d-workbench .view-slot {
+  height: 96px;
+}
+.sf3d-workbench .modeling-stage {
+  display: block;
+  height: 100%;
+  min-height: 0;
+}
+.sf3d-result-column {
+  display: block;
+  grid-template-rows: none;
+}
+.sf3d-workbench .modeling-preview-canvas {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+.sf3d-workbench .sf3d-result-meta {
+  position: absolute;
+  z-index: 6;
+  left: 18px;
+  bottom: 16px;
+  max-width: calc(100% - 36px);
+  border: 1px solid #2f3a40;
+  border-radius: 7px;
+  background: rgba(16, 19, 22, .86);
+  backdrop-filter: blur(10px);
+}
+.sf3d-workbench .parts-list {
+  max-height: calc(100% - 230px);
+  overflow: auto;
+}
+.sf3d-workbench .parts-list>div {
+  grid-template-columns: minmax(0, 1fr) 34px 42px;
+}
+.sf3d-workbench .artifact-list a,
+.sf3d-workbench .use-model,
+.sf3d-workbench .modeling-generate {
+  text-decoration: none;
+}
+.modeling-log-drawer {
+  position: absolute;
+  z-index: 12;
+  left: 300px;
+  right: 280px;
+  bottom: 0;
+  transform: translateY(calc(100% - 38px));
+  border-top: 1px solid #30363b;
+  background: rgba(10, 12, 14, .96);
+  box-shadow: 0 -16px 42px rgba(0, 0, 0, .36);
+  transition: transform 180ms ease;
+}
+.modeling-log-drawer.open {
+  transform: translateY(0);
+}
+.modeling-log-drawer>button {
+  width: 100%;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: #cbd5dc;
+  border: 0;
+  background: #171a1d;
+  font-size: 12px;
+  font-weight: 800;
+}
+.modeling-log-drawer>button span {
+  min-width: 22px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: #2b343a;
+  color: #8bd5f4;
+  font-size: 10px;
+}
+.modeling-log-drawer.open>button svg {
+  transform: rotate(180deg);
+}
+.modeling-log-drawer>div {
+  height: 152px;
+  overflow: auto;
+  padding: 12px 16px 16px;
+  font-family: Consolas, monospace;
+}
+.modeling-log-drawer p {
+  display: flex;
+  gap: 9px;
+  margin: 0 0 6px;
+  color: #bdc8d0;
+  font-size: 10px;
+  line-height: 1.45;
+}
+.modeling-log-drawer time {
+  flex: 0 0 auto;
+  color: #5aa2c9;
+}
+@media (max-width: 1100px) {
+  .integrated-modeling.sf3d-workbench {
+    grid-template-columns: 300px minmax(0, 1fr);
+  }
+  .sf3d-workbench .modeling-parts {
+    right: 12px;
+    width: 280px;
+  }
+  .modeling-log-drawer {
+    left: 300px;
+    right: 0;
+  }
+}
+@media (max-width: 760px) {
+  .integrated-modeling.sf3d-workbench {
+    display: flex;
+  }
+  .sf3d-workbench .modeling-controls,
+  .sf3d-workbench .modeling-parts {
+    width: auto;
+  }
+  .modeling-log-drawer {
+    position: sticky;
+    left: auto;
+    right: auto;
+    bottom: 0;
+    transform: none;
+  }
+  .modeling-log-drawer>div {
+    display: none;
+  }
+  .modeling-log-drawer.open>div {
+    display: block;
+  }
+}

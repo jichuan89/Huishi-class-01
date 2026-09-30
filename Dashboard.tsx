@@ -14,6 +14,8 @@ import ThemeSwitcher from './components/ThemeSwitcher';
 import FollowUpQuestionOverlay from './components/FollowUpQuestionOverlay';
 import MultiAgentPanel from './components/MultiAgentPanel';
 import ModelDetailPanel, { type DetailPanelTab } from './components/ModelDetailPanel';
+import IntegratedModelingStudio from './components/IntegratedModelingStudio';
+import IntegratedPrepStudio from './prep/IntegratedPrepStudio';
 import { buildTeachingPlan, getTeachingModelName, inferTeachingModel, buildKnowledgeExplanation, buildOrchestratorDecision, buildFollowUpQuestion, getAutonomousDisassemblyArgs } from './services/agentRuntime';
 import { Sparkles, Box, Atom, Globe, ChevronDown, ChevronLeft, ChevronRight, MessageSquare, Hand, ScanFace, Move3d, Maximize2, Minimize2, FlaskConical, Heart, Settings, ShieldCheck, X, ClipboardCheck, Loader2, LockKeyhole, Play, Download, LogOut, Upload, FolderOpen, Trash2, Volume2, Info, PanelRightOpen, BookOpenCheck, Mic, Star } from 'lucide-react';
 import { ModelType } from './types';
@@ -196,8 +198,6 @@ interface DashboardProps {
   currentUser: AuthUser;
   onLogout: () => void;
   onUserUpdated: (user: AuthUser) => void;
-  onOpenModelGeneration: () => void;
-  onOpenPrepStudio: () => void;
   onOpenAdmin?: () => void;
 }
 
@@ -306,7 +306,8 @@ function compressFeedbackImage(file: File): Promise<FeedbackAttachment> {
   });
 }
 
-const App: React.FC<DashboardProps> = ({ playIntro = true, initialLocalModelId, onBack, currentUser, onLogout, onUserUpdated, onOpenModelGeneration, onOpenPrepStudio, onOpenAdmin }) => {
+const App: React.FC<DashboardProps> = ({ playIntro = true, initialLocalModelId, onBack, currentUser, onLogout, onUserUpdated, onOpenAdmin }) => {
+  const [workspaceMode, setWorkspaceMode] = useState<'classroom' | 'prep' | 'modeling'>('classroom');
   const [modelUrl, setModelUrl] = useState<string | null>(null);
   const [modelLoadRevision, setModelLoadRevision] = useState(0);
   const [modelType, setModelType] = useState<ModelType>('glb');
@@ -1245,7 +1246,7 @@ const App: React.FC<DashboardProps> = ({ playIntro = true, initialLocalModelId, 
   };
 
   const handleModelUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(event.target.files || []);
+    const files: File[] = event.target.files ? [...event.target.files] : [];
     const modelFile = files.find((file) => /\.(glb|gltf|fbx)$/i.test(file.name));
     event.target.value = '';
     if (!modelFile) {
@@ -2297,7 +2298,7 @@ const App: React.FC<DashboardProps> = ({ playIntro = true, initialLocalModelId, 
       }
 
       if (decision.action === 'open_model_generation') {
-        onOpenModelGeneration();
+        setWorkspaceMode('modeling');
         return;
       }
 
@@ -2694,6 +2695,26 @@ const App: React.FC<DashboardProps> = ({ playIntro = true, initialLocalModelId, 
     };
   }, [zoomSpeedMultiplier, rotationSpeedMultiplier]);
 
+  const useGeneratedModelInClassroom = (url: string, name = '生成的可拆分模型') => {
+    setActiveContent('model');
+    setActiveLocalModelId(null);
+    setModelUrl(url);
+    setModelType('glb');
+    setFileName(name);
+    setModelAssetUrls({});
+    setModelLoadRevision((value) => value + 1);
+    setWorkspaceMode('classroom');
+    setAiAnalysis('生成模型已加载到课堂，可继续旋转、缩放和拆解观察。');
+  };
+
+  const applyLessonToClassroom = (lesson: unknown, lessonModelUrl?: string) => {
+    const plan = lesson as { title?: string; objectives?: string[]; phases?: Array<{ name?: string }>; modelPlan?: { observationTasks?: string[] } };
+    if (lessonModelUrl) useGeneratedModelInClassroom(lessonModelUrl, plan.title ? `${plan.title} · 课堂模型` : undefined);
+    else setWorkspaceMode('classroom');
+    const flow = (plan.phases || []).map((phase) => phase.name).filter(Boolean).join(' → ');
+    setAiAnalysis(`已应用教案“${plan.title || '未命名课程'}”${flow ? `，课堂流程：${flow}` : ''}`);
+  };
+
   return (
     <div className={`lab-shell flex h-screen flex-col overflow-hidden text-ink ${playIntro ? 'lab-intro' : ''} ${isStageAppFullscreen ? 'lab-shell-app-fullscreen' : ''}`}>
       <div className="lab-stars" aria-hidden="true" />
@@ -2719,10 +2740,10 @@ const App: React.FC<DashboardProps> = ({ playIntro = true, initialLocalModelId, 
         </div>
 
         <div className="flex items-center gap-5">
-          <button type="button" className="lab-pill-button" onClick={onOpenPrepStudio}>
+          <button type="button" className={`lab-pill-button ${workspaceMode === 'prep' ? 'is-active' : ''}`} onClick={() => setWorkspaceMode('prep')}>
             <BookOpenCheck className="mr-1.5 text-ink/90" size={14} /> 备课与课件
           </button>
-          <button type="button" className="lab-pill-button" onClick={onOpenModelGeneration}>
+          <button type="button" className={`lab-pill-button ${workspaceMode === 'modeling' ? 'is-active' : ''}`} onClick={() => setWorkspaceMode('modeling')}>
             <Sparkles className="mr-1.5 text-ink/90" size={14} /> 3D建模生成
           </button>
 
@@ -3481,7 +3502,12 @@ const App: React.FC<DashboardProps> = ({ playIntro = true, initialLocalModelId, 
       )}
 
       {/* 主体区域 */}
-      <main className={`lab-workspace relative z-10 flex-1 overflow-hidden px-6 pb-6 ${isSidebarCollapsed ? 'is-sidebar-collapsed' : ''} ${detailPanelVisible ? 'has-detail-panel' : ''}`}>
+      <main className={`lab-workspace relative z-10 flex-1 overflow-hidden px-6 pb-6 ${workspaceMode === 'classroom' && isSidebarCollapsed ? 'is-sidebar-collapsed' : ''} ${workspaceMode === 'classroom' && detailPanelVisible ? 'has-detail-panel' : ''}`}>
+        {workspaceMode === 'prep' ? (
+          <div className="lab-integrated-workspace prep-integrated-shell"><IntegratedPrepStudio onBack={() => setWorkspaceMode('classroom')} onApplyLesson={applyLessonToClassroom} /></div>
+        ) : workspaceMode === 'modeling' ? (
+          <div className="lab-integrated-workspace"><IntegratedModelingStudio onBack={() => setWorkspaceMode('classroom')} onUseModel={(url) => useGeneratedModelInClassroom(url)} /></div>
+        ) : <>
         {/* 侧边栏 */}
         <aside
           className={`lab-sidebar flex min-h-0 flex-col transition-all ${playIntro ? 'lab-sidebar-enter' : ''} ${isSidebarCollapsed ? 'is-collapsed items-center overflow-hidden p-3' : 'lab-sidebar-expanded overflow-y-auto p-5'}`}
@@ -4359,6 +4385,7 @@ const App: React.FC<DashboardProps> = ({ playIntro = true, initialLocalModelId, 
             }}
           />
         )}
+        </>}
       </main>
 
       <footer
