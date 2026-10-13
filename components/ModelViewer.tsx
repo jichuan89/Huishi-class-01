@@ -1,7 +1,7 @@
 
 import React, { useRef, Suspense, useState, useEffect, useMemo, useCallback } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
-import { OrbitControls, ContactShadows, Html } from '@react-three/drei';
+import { OrbitControls, ContactShadows, Html, Line } from '@react-three/drei';
 import * as THREE from 'three';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
@@ -76,6 +76,7 @@ const EARTH_POLITICAL_TARGET_SIZE = 3.5;
 const MODEL_SHADOW_TRIANGLE_BUDGET = 250_000;
 const MAX_RENDER_DPR = 1.25;
 const STABLE_RENDER_DPR = 1.5;
+const ORBIT_POLAR_EPSILON = 0.01;
 const INTERACTIVE_LOD_URL_BY_KEY: Record<string, string> = {
   'heart-optimized.glb': '/models/heart-interactive-lod.glb',
   'hiv-virus.glb': '/models/hiv-virus-interactive-lod.glb',
@@ -87,7 +88,6 @@ const INTERACTIVE_LOD_URL_BY_KEY: Record<string, string> = {
   'organ-liver.glb': '/models/organ-liver-interactive-lod.glb',
   'organ-lungs.glb': '/models/organ-lungs-interactive-lod.glb',
   'organ-pancreas.glb': '/models/organ-pancreas-disassemblable.glb',
-  'organ-skin.glb': '/models/organ-skin-disassemblable.glb',
 };
 const PUBCHEM_6233_MODEL_KEY = 'pubchem-6233-bas-color-print_nih3d.glb';
 const NITROBENZENE_MODEL_KEY = '7416-bas-color-print_nih3d.glb';
@@ -1136,6 +1136,95 @@ const EarthLayerFollowLabels: React.FC<{
   );
 };
 
+const skinStructureLabels = [
+  { number: '1', title: '表皮层', anchorX: 0.12, anchorY: 0.83, labelX: 0.86, labelY: 0.96 },
+  { number: '2', title: '汗腺', anchorX: 0.18, anchorY: 0.51, labelX: 0.96, labelY: 0.67 },
+  { number: '3', title: '毛囊', anchorX: 0.16, anchorY: 0.34, labelX: 0.96, labelY: 0.38 },
+  { number: '4', title: '真皮层', anchorX: -0.24, anchorY: 0.48, labelX: -0.96, labelY: 0.53 },
+  { number: '5', title: '皮下组织', anchorX: -0.26, anchorY: 0.13, labelX: -0.96, labelY: 0.10 },
+] as const;
+
+const SkinStructureFollowLabels: React.FC<{
+  modelScene: THREE.Object3D;
+  rootGroupRef: React.RefObject<THREE.Group>;
+  enabled: boolean;
+}> = ({ modelScene, rootGroupRef, enabled }) => {
+  const [layout, setLayout] = useState<Array<{
+    number: string;
+    title: string;
+    anchor: THREE.Vector3;
+    label: THREE.Vector3;
+  }>>([]);
+
+  useEffect(() => {
+    const rootGroup = rootGroupRef.current;
+    if (!enabled || !rootGroup) {
+      setLayout([]);
+      return;
+    }
+
+    modelScene.updateWorldMatrix(true, true);
+    rootGroup.updateWorldMatrix(true, false);
+    const worldBounds = new THREE.Box3().setFromObject(modelScene);
+    if (worldBounds.isEmpty()) {
+      setLayout([]);
+      return;
+    }
+
+    // Convert the loaded model bounds into the same local space as the outer
+    // viewer group, so the markers rotate with the model and stay anchored.
+    const groupInverse = rootGroup.matrixWorld.clone().invert();
+    const localBounds = new THREE.Box3();
+    const corners = [
+      [worldBounds.min.x, worldBounds.min.y, worldBounds.min.z],
+      [worldBounds.min.x, worldBounds.min.y, worldBounds.max.z],
+      [worldBounds.min.x, worldBounds.max.y, worldBounds.min.z],
+      [worldBounds.min.x, worldBounds.max.y, worldBounds.max.z],
+      [worldBounds.max.x, worldBounds.min.y, worldBounds.min.z],
+      [worldBounds.max.x, worldBounds.min.y, worldBounds.max.z],
+      [worldBounds.max.x, worldBounds.max.y, worldBounds.min.z],
+      [worldBounds.max.x, worldBounds.max.y, worldBounds.max.z],
+    ];
+    corners.forEach(([x, y, z]) => {
+      localBounds.expandByPoint(new THREE.Vector3(x, y, z).applyMatrix4(groupInverse));
+    });
+
+    const size = localBounds.getSize(new THREE.Vector3());
+    const center = localBounds.getCenter(new THREE.Vector3());
+    const frontZ = localBounds.max.z + Math.max(0.025, size.z * 0.025);
+    const pointAt = (xRatio: number, yRatio: number) => new THREE.Vector3(
+      center.x + size.x * xRatio,
+      localBounds.min.y + size.y * yRatio,
+      frontZ,
+    );
+
+    setLayout(skinStructureLabels.map((item) => ({
+      number: item.number,
+      title: item.title,
+      anchor: pointAt(item.anchorX, item.anchorY),
+      label: pointAt(item.labelX, item.labelY),
+    })));
+  }, [enabled, modelScene, rootGroupRef]);
+
+  if (!enabled || layout.length === 0) return null;
+
+  return (
+    <group>
+      {layout.map((item) => (
+        <group key={item.number}>
+          <Line points={[item.anchor, item.label]} color="#e5f3ff" lineWidth={1.4} transparent opacity={0.9} />
+          <Html distanceFactor={7} position={item.label} center>
+            <div className="pointer-events-none flex items-center gap-1 whitespace-nowrap rounded-full border border-white/55 bg-slate-950/90 px-2 py-1 text-[9px] font-bold text-white shadow-lg shadow-black/25 backdrop-blur-sm">
+              <span className="flex h-4 w-4 items-center justify-center rounded-full bg-cyan-300 text-[9px] font-black text-slate-950">{item.number}</span>
+              <span>{item.title}</span>
+            </div>
+          </Html>
+        </group>
+      ))}
+    </group>
+  );
+};
+
 const LocalEnvironment: React.FC = () => {
   const { gl, scene } = useThree();
 
@@ -1157,7 +1246,7 @@ const LocalEnvironment: React.FC = () => {
 };
 
 // Unified model component. FBX / GLB / GLTF all use the same layer-based disassembly path.
-const LayeredModel: React.FC<{ url: string; modelType: ModelType; assetUrls?: Record<string, string>; controlRef: React.MutableRefObject<ControlRefs>; cameraTarget: CameraTarget; showEarthLabels?: boolean; accent?: string; onLoadProgress?: (progress: LoadProgress) => void; onLoadComplete?: () => void; onLoadError?: (error: ModelLoadError) => void; onPartMoved?: (partName: string) => void; onDisassemblyAvailabilityChange?: (available: boolean) => void }> = ({ url, modelType, assetUrls, controlRef, cameraTarget, showEarthLabels = false, accent = '#86e3ce', onLoadProgress, onLoadComplete, onLoadError, onPartMoved, onDisassemblyAvailabilityChange }) => {
+const LayeredModel: React.FC<{ url: string; modelType: ModelType; assetUrls?: Record<string, string>; controlRef: React.MutableRefObject<ControlRefs>; cameraTarget: CameraTarget; showEarthLabels?: boolean; showSkinLabels?: boolean; accent?: string; onLoadProgress?: (progress: LoadProgress) => void; onLoadComplete?: () => void; onLoadError?: (error: ModelLoadError) => void; onPartMoved?: (partName: string) => void; onDisassemblyAvailabilityChange?: (available: boolean) => void }> = ({ url, modelType, assetUrls, controlRef, cameraTarget, showEarthLabels = false, showSkinLabels = false, accent = '#86e3ce', onLoadProgress, onLoadComplete, onLoadError, onPartMoved, onDisassemblyAvailabilityChange }) => {
   const [modelScene, setModelScene] = useState<THREE.Object3D | null>(null);
   const [modelParts, setModelParts] = useState<GrabbablePart[]>([]);
   const [grabbableParts, setGrabbableParts] = useState<GrabbablePart[]>([]);
@@ -1252,6 +1341,7 @@ const LayeredModel: React.FC<{ url: string; modelType: ModelType; assetUrls?: Re
       if (disposed) return;
 
       const lowerUrl = url.toLowerCase();
+      const isSkinModel = lowerUrl.includes('organ-skin');
       const isEarthLayers = lowerUrl.includes('earth-layers');
       const isEarthPolitical = lowerUrl.includes('earth-political') || lowerUrl.includes('earth_political');
       let targetSize = MODEL_TARGET_SIZE;
@@ -1284,14 +1374,14 @@ const LayeredModel: React.FC<{ url: string; modelType: ModelType; assetUrls?: Re
         : isPubchem6233Model(url)
           ? preparePubchem6233Model(root)
           : [];
-      const parts = isDiamondModel(url) || isDiamondUnitCellModel(url)
+      const parts = isSkinModel || isDiamondModel(url) || isDiamondUnitCellModel(url)
         ? []
         : customParts.length > 0
           ? customParts
           : findLayerRoots(root);
-      const candidateInteractionParts = Array.isArray(root.userData.grabbableParts)
+      const candidateInteractionParts = !isSkinModel && Array.isArray(root.userData.grabbableParts)
         ? root.userData.grabbableParts as GrabbablePart[]
-        : parts;
+        : isSkinModel ? [] : parts;
       const interactionParts = candidateInteractionParts.filter(isDisassemblablePart);
 
       Array.from(new Set([...parts, ...interactionParts])).forEach((part) => {
@@ -1606,7 +1696,7 @@ const LayeredModel: React.FC<{ url: string; modelType: ModelType; assetUrls?: Re
       const sensitivity = 0.31 * (controlRef.current.interactionSettings?.rotationSpeed ?? 5.0);
       sph.theta -= smoothRotY * sensitivity * frameDelta;
       sph.phi -= smoothRotX * sensitivity * frameDelta;
-      sph.phi = Math.max(0.1, Math.min(Math.PI - 0.1, sph.phi));
+      sph.phi = Math.max(ORBIT_POLAR_EPSILON, Math.min(Math.PI - ORBIT_POLAR_EPSILON, sph.phi));
       sph.makeSafe();
     }
 
@@ -1783,6 +1873,7 @@ const LayeredModel: React.FC<{ url: string; modelType: ModelType; assetUrls?: Re
     <group ref={groupRef} position={[0, 0, 0]}>
       <primitive object={modelScene} />
       <EarthLayerFollowLabels parts={modelParts} rootGroupRef={groupRef} controlRef={controlRef} enabled={showEarthLabels} />
+      {showSkinLabels && <SkinStructureFollowLabels modelScene={modelScene} rootGroupRef={groupRef} enabled={showSkinLabels} />}
     </group>
   );
 };
@@ -2213,10 +2304,41 @@ const CameraInit: React.FC<{ modelUrl: string; target: CameraTarget }> = ({ mode
 
   useEffect(() => {
     const lower = modelUrl.toLowerCase();
-    if (lower.includes('心脏模型') || lower.includes('heart')) {
-      camera.position.set(0, 1.5, 4.5);
+    if (lower.includes('heart')) {
+      // 心脏 正面观（大血管朝上，右心室在观众左侧）
+      camera.position.set(0, 0.8, 3.0);
+    } else if (lower.includes('brain')) {
+      // 大脑 左侧面观（参考医学解剖图：脑回朝左，小脑在下，脑干挂底）
+      camera.position.set(-2.8, 0.8, 1.5);
+    } else if (lower.includes('lungs')) {
+      // 肺 正面观
+      camera.position.set(0, 0.8, 3.0);
+    } else if (lower.includes('liver')) {
+      // 肝 正面观
+      camera.position.set(0, 0.8, 3.0);
+    } else if (lower.includes('kidney')) {
+      // 肾 正面观
+      camera.position.set(0, 0.8, 3.0);
+    } else if (lower.includes('pancreas')) {
+      // 胰腺 侧面观（原正面观绕Y轴转90°）
+      camera.position.set(3.0, 0.8, 0);
+    } else if (lower.includes('intestine')) {
+      // 肠道 正面观
+      camera.position.set(0, 0.8, 3.0);
+    } else if (lower.includes('eyeball')) {
+      // 眼球 正面观
+      camera.position.set(0, 0.5, 2.5);
+    } else if (lower.includes('skin')) {
+      // 皮肤 正面观（拉远以便看到整个皮肤层次 + 标签）
+      camera.position.set(0, 1.5, 5.0);
+    } else if (lower.includes('earth-layers') || lower.includes('terrain-topography')) {
+      // 地球内部结构 / 地形图（拉远以便看到整个地球 + 所有圈层标签）
+      camera.position.set(0, 2.5, 7.5);
+    } else if (lower.includes('hiv')) {
+      // HIV 病毒 3/4 视角
+      camera.position.set(2.0, 1.5, 2.0);
     } else {
-      camera.position.set(3.5, 4, 3.5);
+      camera.position.set(2.5, 2.0, 2.5);
     }
     camera.lookAt(target[0], target[1], target[2]);
     controls?.update?.();
@@ -2358,7 +2480,7 @@ const ModelViewer: React.FC<ModelViewerProps> = ({ modelUrl, modelType, assetUrl
   }, [onPartMoved]);
 
   useEffect(() => {
-    if (lowerModelUrl.includes('earth-layers')) {
+    if (lowerModelUrl.includes('earth-layers') || lowerModelUrl.includes('organ-skin')) {
       setShowLabels(true);
     } else {
       setShowLabels(false);
@@ -2453,6 +2575,7 @@ const ModelViewer: React.FC<ModelViewerProps> = ({ modelUrl, modelType, assetUrl
                 cameraTarget={cameraTarget}
                 accent={themeDef.accent}
                 showEarthLabels={lowerModelUrl.includes('earth-layers') && showLabels}
+                showSkinLabels={lowerModelUrl.includes('organ-skin') && showLabels}
                 onDisassemblyAvailabilityChange={onDisassemblyAvailabilityChange}
                 onLoadProgress={onLoadProgress}
                 onLoadComplete={handleModelLoadComplete}
@@ -2485,8 +2608,8 @@ const ModelViewer: React.FC<ModelViewerProps> = ({ modelUrl, modelType, assetUrl
             target={cameraTarget}
             enablePan={false}
             enableZoom={true}
-            minPolarAngle={Math.PI / 6}
-            maxPolarAngle={Math.PI / 2.2}
+            minPolarAngle={ORBIT_POLAR_EPSILON}
+            maxPolarAngle={Math.PI - ORBIT_POLAR_EPSILON}
             minDistance={3}
             maxDistance={12}
             enableDamping

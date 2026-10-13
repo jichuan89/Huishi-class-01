@@ -199,6 +199,7 @@ const coursewareMatchesLocalModel = (manifest: CoursewareManifest, localModelId:
   return manifest.model.localModelId === localModelId;
 };
 const HIDDEN_RESOURCE_TAG_NAMES = new Set(['周田孩子作品']);
+const HIDDEN_RESOURCE_MODEL_KEYS = new Set(['chem-diamond', 'chem-diamond-cell', 'geo-terrain']);
 
 const RESOURCE_TAG_ICONS = {
   box: Box,
@@ -251,7 +252,7 @@ const sleep = (ms: number, signal?: AbortSignal) => new Promise<void>((resolve, 
 });
 
 const INTRO_INSTRUCTION =
-  '右手捏合：拖拽 | 右手食指中指并拢：控制旋转\n左手张开/闭合：缩放';
+  '单手模式优先 · Single Hand First\n旋转：食指中指伸直贴合控制旋转，其余手指握拳\n缩放：拇食指靠近缩小 | 张开放大，其余手指握拳\n拆解：拇食指抓取部位，其余手指伸直\n双手模式：右手旋转 / 左手缩放 / 双手均可拆解';
 
 interface DashboardProps {
   playIntro?: boolean;
@@ -1092,6 +1093,12 @@ const App: React.FC<DashboardProps> = ({ playIntro = true, initialLocalModelId, 
   // Loading progress timer for quiz button
   const quizProgressRef = useRef<HTMLDivElement>(null);
 
+  const openClassQuiz = () => {
+    if (classCourseware && classWarmupQuestions.length === 0) return;
+    setQuizSubjectFilter(modelUrl || undefined);
+    setQuizMode(true);
+  };
+
   useEffect(() => {
     if (!quizLaunchPending || !cameraActive || handTrackingStatus.state === 'starting') return;
     setQuizLaunchPending(false);
@@ -1187,6 +1194,33 @@ const App: React.FC<DashboardProps> = ({ playIntro = true, initialLocalModelId, 
     };
   };
 
+  const canResetDisassembly = (): boolean => {
+    if (!modelUrl || activeContent !== 'model') return false;
+    const lower = modelUrl.toLowerCase();
+    if (lower.includes('diamond.glb') || lower.includes('diamond-unit-cell')) return false;
+    if (lower.includes('earth-layers')) return false; // 地球保持四层展示
+    if (isOneWayAnatomyModel(modelUrl, activeLocalModelId ?? undefined)) return false;
+    return true;
+  };
+
+  const resetDisassembly = useCallback(() => {
+    if (!canResetDisassembly()) return;
+    const nextActionId = (controlRef.current.agentDisassembly?.actionId ?? 0) + 1;
+    controlRef.current.agentDisassembly = {
+      enabled: false,
+      strength: 0,
+      spacing: 1.1,
+      avoidOverlap: true,
+      actionId: nextActionId,
+      label: '复原模型',
+    };
+    setAiAnalysis('模型已复原。');
+    void logUserActivity({
+      type: 'model.reset-disassembly',
+      payload: { modelName: fileName || modelUrl },
+    });
+  }, [modelUrl, activeContent, fileName, activeLocalModelId]);
+
   const revokeObjectUrls = () => {
     objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
     objectUrlsRef.current = [];
@@ -1220,7 +1254,12 @@ const App: React.FC<DashboardProps> = ({ playIntro = true, initialLocalModelId, 
     fetchResourceLibrary()
       .then((tags) => {
         if (cancelled) return;
-        const visibleTags = tags.filter((tag) => !HIDDEN_RESOURCE_TAG_NAMES.has(tag.name));
+        const visibleTags = tags
+          .filter((tag) => !HIDDEN_RESOURCE_TAG_NAMES.has(tag.name))
+          .map((tag) => ({
+            ...tag,
+            models: tag.models.filter((model) => !HIDDEN_RESOURCE_MODEL_KEYS.has(model.seedKey || getModelSeedKeyByUrl(model.url) || '')),
+          }));
         setResourceTags(visibleTags);
         setResourceLibraryError('');
         setExpandedCategories((current) => {
@@ -1458,14 +1497,20 @@ const App: React.FC<DashboardProps> = ({ playIntro = true, initialLocalModelId, 
     setAiAnalysis(`正在演示: ${name}`);
   };
 
-  const openLocalModel = async (modelId: string) => {
+  const openLocalModel = async (modelId: string, options: { forceReload?: boolean; propagateError?: boolean } = {}) => {
+    let readTimeout: ReturnType<typeof setTimeout> | undefined;
     try {
       setLocalLibraryError('');
-      const record = await getLocalModel(modelId, currentUser.id);
+      const record = await Promise.race([
+        getLocalModel(modelId, currentUser.id),
+        new Promise<never>((_, reject) => {
+          readTimeout = setTimeout(() => reject(new Error('本地模型读取超时，请重试或重新导入模型')), 10000);
+        }),
+      ]);
       if (!record) throw new Error('这个模型已不在浏览器本地模型库中');
-      if (activeContent === 'model' && activeLocalModelId === record.id) {
+      if (!options.forceReload && activeContent === 'model' && activeLocalModelId === record.id && modelUrl) {
         setAiAnalysis(`已从我的模型加载：${record.name}`);
-        return;
+        return { url: modelUrl, type: record.type, assetUrls: modelAssetUrls, fileName: record.name };
       }
 
       const previousModel = activeContent === 'model' && modelUrl
@@ -1527,10 +1572,14 @@ const App: React.FC<DashboardProps> = ({ playIntro = true, initialLocalModelId, 
         setCameraActive(true);
       }
       setAiAnalysis(`已从我的模型加载：${record.name}`);
+      return { url, type: record.type, assetUrls: nextAssetUrls, fileName: record.name };
     } catch (loadError) {
       const message = loadError instanceof Error ? loadError.message : '本地模型读取失败';
       setLocalLibraryError(message);
       setAiAnalysis(message);
+      if (options.propagateError) throw new Error(message);
+    } finally {
+      if (readTimeout !== undefined) clearTimeout(readTimeout);
     }
   };
 
@@ -4098,23 +4147,29 @@ const App: React.FC<DashboardProps> = ({ playIntro = true, initialLocalModelId, 
                             <div className="flex items-center gap-2 pb-2 border-b border-cyan-500/30">
                               <div className="lab-instruction-icon rounded-lg p-1.5"><Move3d size={14} className="text-cyan" /></div>
                               <div className="flex flex-col">
-                                <span className="text-[10px] font-black text-ink uppercase">双手协同</span>
-                                <span className="text-[9px] text-cyan font-bold">左手缩放 | 右手旋转/拖拽</span>
+                                <span className="text-[10px] font-black text-ink uppercase">双手协同模式</span>
+                                <span className="text-[9px] text-cyan font-bold">❗单手模式优先</span>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <div className="lab-instruction-icon rounded-lg p-1.5"><Hand size={14} className="text-cyan" /></div>
+                              <div className="flex flex-col">
+                                <span className="text-[10px] font-black text-ink uppercase">右手旋转</span>
+                                <span className="text-[9px] text-ink-soft font-bold">食指中指伸直贴合控制旋转，其余手指握拳闭合</span>
                               </div>
                             </div>
                             <div className="flex items-center gap-2">
                               <div className="lab-instruction-icon rounded-lg p-1.5"><Hand size={14} className="text-cyan" /></div>
                               <div className="flex flex-col">
                                 <span className="text-[10px] font-black text-ink uppercase">左手缩放</span>
-                                <span className="text-[9px] text-ink-soft font-bold">张开 → 放大 | 握拳 → 缩小</span>
+                                <span className="text-[9px] text-ink-soft font-bold">张开手掌放大 | 握拳缩小</span>
                               </div>
                             </div>
                             <div className="flex items-center gap-2">
                               <div className="lab-instruction-icon rounded-lg p-1.5"><ScanFace size={14} className="text-cyan" /></div>
                               <div className="flex flex-col">
-                                <span className="text-[10px] font-black text-ink uppercase">右手交互</span>
-                                <span className="text-[9px] text-cyan font-bold">捏合 → 拖拽零件</span>
-                                <span className="text-[9px] text-ink-soft font-bold">食指+中指并拢滑动 → 旋转画面</span>
+                                <span className="text-[10px] font-black text-ink uppercase">拆解（可双手同时）</span>
+                                <span className="text-[9px] text-cyan font-bold">拇指食指抓取部位进行拆解，其余手指伸直</span>
                               </div>
                             </div>
                           </>
@@ -4123,22 +4178,29 @@ const App: React.FC<DashboardProps> = ({ playIntro = true, initialLocalModelId, 
                             <div className="flex items-center gap-2 pb-2 border-b border-cyan-500/30">
                               <div className="lab-instruction-icon rounded-lg p-1.5"><Hand size={14} className="text-cyan" /></div>
                               <div className="flex flex-col">
-                                <span className="text-[10px] font-black text-ink uppercase">右手优先</span>
-                                <span className="text-[9px] text-cyan font-bold">张掌放大 | 握拳缩小</span>
+                                <span className="text-[10px] font-black text-ink uppercase">单手模式</span>
+                                <span className="text-[9px] text-cyan font-bold">❗单手模式优先</span>
                               </div>
                             </div>
                             <div className="flex items-center gap-2">
                               <div className="lab-instruction-icon rounded-lg p-1.5"><Hand size={14} className="text-cyan" /></div>
                               <div className="flex flex-col">
-                                <span className="text-[10px] font-black text-ink uppercase">捏合拖拽</span>
-                                <span className="text-[9px] text-ink-soft font-bold">食指+拇指捏合 → 拖拽零件</span>
+                                <span className="text-[10px] font-black text-ink uppercase">旋转</span>
+                                <span className="text-[9px] text-ink-soft font-bold">食指中指伸直贴合控制旋转，其余手指握拳闭合</span>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <div className="lab-instruction-icon rounded-lg p-1.5"><Hand size={14} className="text-cyan" /></div>
+                              <div className="flex flex-col">
+                                <span className="text-[10px] font-black text-ink uppercase">缩放</span>
+                                <span className="text-[9px] text-ink-soft font-bold">拇指食指靠近缩小 | 张开放大，其余手指握拳闭合</span>
                               </div>
                             </div>
                             <div className="flex items-center gap-2">
                               <div className="lab-instruction-icon rounded-lg p-1.5"><ScanFace size={14} className="text-cyan" /></div>
                               <div className="flex flex-col">
-                                <span className="text-[10px] font-black text-ink uppercase">互斥控制</span>
-                                <span className="text-[9px] text-cyan font-bold">双指旋转优先；缩放与拖拽不会同时触发</span>
+                                <span className="text-[10px] font-black text-ink uppercase">拆解</span>
+                                <span className="text-[9px] text-cyan font-bold">拇指食指抓取部位进行拆解，其余手指伸直</span>
                               </div>
                             </div>
                           </>

@@ -516,7 +516,7 @@ const QuizOverlay: React.FC<QuizOverlayProps> = ({ controlRef, cameraActive, tra
   const handleRestart = () => {
     stopXiaozhiSpeech();
     setVoiceError('');
-    setSession(createQuizSession(5, subjectFilter));
+    setSession(warmupQuestions?.length ? createQuizSessionFromQuestions(warmupQuestions) : createQuizSession(5, subjectFilter));
     setPhase('intro');
     setCountdown(3);
   };

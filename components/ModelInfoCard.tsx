@@ -30,19 +30,23 @@ const ModelInfoCard: React.FC<ModelInfoCardProps> = ({ profile }) => {
 
   return (
   <section className="flex min-h-0 flex-1 flex-col" aria-label={`${profile.title}模型说明`}>
-    <div className="relative h-36 shrink-0 overflow-hidden sm:h-44">
-      <img src={illustration} alt={`${profile.title}示意图`} onError={() => setIllustration(FALLBACK_ILLUSTRATIONS[profile.category])} className="h-full w-full object-cover" />
-      <div className="absolute inset-0 bg-gradient-to-t from-[#06111d] via-[#06111d]/15 to-transparent" />
-      <span className={`absolute bottom-3 left-4 rounded-full border px-2.5 py-1 text-[10px] font-black tracking-widest ${CATEGORY_STYLES[profile.category]}`}>
-        {profile.category}模型
-      </span>
-    </div>
+      <header className="flex shrink-0 items-center gap-3 px-5 pb-3 pt-5">
+        <div className="min-w-0 flex-1">
+          <span className={`inline-block rounded-full border px-2.5 py-1 text-[10px] font-black ${CATEGORY_STYLES[profile.category]}`}>
+            {profile.category}模型
+          </span>
+          <h2 className="mt-3 break-words text-2xl font-black text-white">{profile.title}</h2>
+          <p className="mt-1 break-words text-xs font-bold text-cyan-200">{profile.subtitle}</p>
+        </div>
+        <img
+          src={illustration}
+          alt={`${profile.title}示意图`}
+          onError={() => setIllustration(FALLBACK_ILLUSTRATIONS[profile.category])}
+          className="h-[88px] w-[88px] shrink-0 rounded-full bg-white/5 object-contain p-2"
+        />
+      </header>
 
     <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-5 pb-6 pt-4 [scrollbar-color:rgba(34,211,238,0.24)_transparent]">
-      <header>
-        <h2 className="text-2xl font-black tracking-tight text-white">{profile.title}</h2>
-        <p className="mt-1 text-xs font-bold tracking-wide text-cyan-200">{profile.subtitle}</p>
-      </header>
       <p className="text-sm leading-7 text-slate-300">{profile.description}</p>
 
       <section aria-label="模型能力" className="space-y-2">

@@ -8,7 +8,7 @@ export default defineConfig(({ mode }) => {
     const apiPort = env.API_PORT || '4000';
     return {
       server: {
-        port: 3000,
+        port: Number(env.WEB_PORT || 3000),
         // The API validates TTS WebSocket origins against CLIENT_ORIGIN.
         // Keep the web port stable so proxy upgrades continue to match it.
         strictPort: true,
@@ -31,7 +31,7 @@ export default defineConfig(({ mode }) => {
       },
       resolve: {
         alias: {
-          '@': path.resolve(__dirname, '.'),
+          '@': path.resolve(import.meta.dirname, '.'),
         }
       }
     };

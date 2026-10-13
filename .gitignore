@@ -53,7 +53,18 @@ scripts/_*.json
 scripts/_dbg_*.py
 scripts/_probe_*.mjs
 scripts/_render_*.mjs
+scripts/_tmp_*.py
 output/
 outputs/
 check_plans.mjs
 public/models/*.original.glb
+
+# 打包产物 / 版本归档（体积大，不进仓库）
+versions/
+
+# 规划与调试草稿
+.planning/
+
+# 临时截图（排查视觉问题时手动生成，非项目资源）
+pw_zoom*.png
+codex-clipboard-resized.png
