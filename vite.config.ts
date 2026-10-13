@@ -13,6 +13,9 @@ export default defineConfig(({ mode }) => {
         // Keep the web port stable so proxy upgrades continue to match it.
         strictPort: true,
         host: '0.0.0.0',
+        watch: {
+          ignored: ['**/teacher-studio-service/generated/**', '**/server/storage/**'],
+        },
         proxy: {
           '/api': {
             target: `http://localhost:${apiPort}`,

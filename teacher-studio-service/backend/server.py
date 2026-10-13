@@ -1,12 +1,19 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
+import base64
+import time
+import threading
 import io
 import html
 import hashlib
 import os
 import re
+import shutil
+import ssl
 import struct
+import subprocess
+import tempfile
 import uuid
 import zipfile
 import xml.etree.ElementTree as ET
@@ -28,10 +35,15 @@ from pptx.util import Inches, Pt
 import biomed_curriculum
 import biomed_models
 import biomed_slides
+import courseware
+import heart_anatomy
 import image_model
+import lesson_design
 import local_reconstruction
+import ollama_adapter
 import partfield_adapter
 import triposr_local
+import teaching_benchmarks
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -61,6 +73,293 @@ def env_value(name, fallback=""):
 
 def now_iso():
     return datetime.now().isoformat(timespec="seconds")
+
+
+def generate_warmup_questions(payload):
+    """Build five local, editable questions from the current lesson and model manifest."""
+    lesson = payload.get("lessonPlan") or {}
+    model = payload.get("model") or {}
+    model_url = str(model.get("glbUrl") or "").strip() if isinstance(model, dict) else ""
+    parts = (model.get("parts") or model.get("partDetails") or []) if isinstance(model, dict) else []
+    normalized = []
+    for part in parts:
+        if isinstance(part, str):
+            normalized.append({"key": part, "name": part})
+        elif isinstance(part, dict):
+            key = part.get("partKey") or part.get("key") or part.get("name")
+            name = part.get("partLabel") or part.get("name") or key
+            if key and name:
+                normalized.append({"key": key, "name": name})
+    normalized = normalized[:12]
+    has_model = bool(model_url and normalized)
+    lesson_id = str(lesson.get("id") or uuid.uuid4().hex)
+    title = str(lesson.get("title") or "本课内容")
+    subject = str((lesson.get("request") or {}).get("subject") or "生物")
+    objectives = lesson.get("objectives") or lesson.get("learningOutcomes") or []
+    objective = str(objectives[0]) if objectives else f"解释{title}中的核心结构与机制"
+
+    if has_model:
+        names = [item["name"] for item in normalized]
+        keys = [item["key"] for item in normalized]
+        first = normalized[0]
+        second = normalized[1] if len(normalized) > 1 else normalized[0]
+
+        def model_options(correct):
+            values = [correct]
+            for candidate in names + ["其他未标注结构", "模型外部背景", "无法仅凭颜色判断"]:
+                if candidate not in values:
+                    values.append(candidate)
+                if len(values) == 4:
+                    break
+            return values
+
+        questions = [
+            {"question": f"在“{title}”模型中，观察任务首先要求定位哪个部件？", "options": model_options(first["name"]), "correctIndex": 0, "partKeys": [first["key"]], "difficulty": "基础", "explanation": f"应先依据部件树和空间位置定位{first['name']}，再观察其连接关系。"},
+            {"question": f"观察{second['name']}时，判断其位置或连接关系最可靠的依据是什么？", "options": ["部件名称、空间位置与相邻结构", "模型背景颜色", "屏幕亮度", "文件大小"], "correctIndex": 0, "partKeys": [second["key"]], "difficulty": "基础", "explanation": "结构关系应由名称、位置和相邻连接共同判断。"},
+            {"question": "旋转、隐藏或隔离模型部件后，哪项观察记录最有效？", "options": ["记录视角变化前后的空间关系", "只记录部件颜色", "只记录缩放倍数", "忽略相邻结构"], "correctIndex": 0, "partKeys": keys[:2], "difficulty": "基础", "explanation": "改变视角是为了核对结构的三维空间关系，而不是比较显示颜色。"},
+            {"question": "观察模型时，怎样从结构推断其功能？", "options": ["结合位置、形态、连接关系与机制解释", "只根据外观颜色判断", "只根据部件大小判断", "不需要证据直接猜测"], "correctIndex": 0, "partKeys": keys[:2], "difficulty": "进阶", "explanation": "结构功能推断需要同时使用形态、位置、连接关系和课程机制。"},
+            {"question": f"针对“{title}”，形成课堂结论时最完整的做法是什么？", "options": ["说明结构、机制、证据及适用边界", "只写一个部件名称", "只复述模型颜色", "跳过证据直接下结论"], "correctIndex": 0, "partKeys": keys[:3], "difficulty": "进阶", "explanation": "完整结论需要结构事实、机制解释和证据边界相互支持。"},
+        ]
+    else:
+        questions = [
+            {"question": f"阅读“{title}”结构图时，第一步应完成什么任务？", "options": ["确认图例、方向和关键结构名称", "只看配色是否美观", "跳过标注直接记答案", "只统计结构数量"], "correctIndex": 0, "partKeys": [], "difficulty": "基础", "explanation": "结构图观察应先确认图例、方向和标注，再分析结构关系。"},
+            {"question": f"分析“{title}”中的结构位置或连接关系，哪类证据最可靠？", "options": ["教材标注、相邻关系与流程方向", "页面背景颜色", "文字字号大小", "图片装饰效果"], "correctIndex": 0, "partKeys": [], "difficulty": "基础", "explanation": "位置与连接关系应由规范标注、相邻结构和过程方向共同证明。"},
+            {"question": f"解释“{title}”的机制过程时，合理的分析顺序是什么？", "options": ["条件或输入→关键过程→结果或输出", "先写结论再删除证据", "只罗列名词不说明关系", "按页面颜色排列"], "correctIndex": 0, "partKeys": [], "difficulty": "基础", "explanation": "机制解释需要呈现条件、关键过程与结果之间的因果链。"},
+            {"question": f"要完成学习目标“{objective}”，哪种回答最充分？", "options": ["用结构证据解释功能或机制", "只背诵一个术语", "只描述图片颜色", "省略理由只给结论"], "correctIndex": 0, "partKeys": [], "difficulty": "进阶", "explanation": "有效回答应把结构证据与功能或机制联系起来。"},
+            {"question": f"将“{title}”应用到新案例时，最合适的判断方法是什么？", "options": ["提取案例证据并逐项对应课堂机制", "凭第一印象直接选择", "只寻找熟悉词语", "忽略不支持结论的信息"], "correctIndex": 0, "partKeys": [], "difficulty": "进阶", "explanation": "迁移应用要求把案例证据与课堂机制逐项对应，并检查反例。"},
+        ]
+    _spread_warmup_answers(questions)
+    alignment = lesson.get("alignmentMatrix") or []
+    result = []
+    for index, item in enumerate(questions):
+        alignment_item = alignment[index % len(alignment)] if alignment and isinstance(alignment[index % len(alignment)], dict) else {}
+        objective_id = alignment_item.get("objectiveId")
+        activity_ids = alignment_item.get("activityIds") or []
+        result.append({
+            "id": f"warmup-{lesson_id}-{index + 1}",
+            "modelUrl": model_url if has_model else "",
+            "subject": subject,
+            "category": "model-warmup",
+            "question": item["question"],
+            "options": item["options"],
+            "correctIndex": item["correctIndex"],
+            "explanation": item["explanation"],
+            "optionType": 4,
+            "modelPartKeys": item["partKeys"],
+            "lessonId": lesson_id,
+            "difficulty": item["difficulty"],
+            "enabled": True,
+            "source": "generated",
+            "objectiveIds": [objective_id] if objective_id else [],
+            "activityId": activity_ids[0] if activity_ids else "",
+        })
+    return result
+
+
+WARMUP_TYPES = ("部件识别", "位置或连接关系", "模型观察判断", "结构与功能", "机制迁移")
+WARMUP_CORRECT_POSITIONS = (0, 1, 2, 3, 1)
+
+
+def _spread_warmup_answers(items, indexes=None):
+    indexes = indexes or WARMUP_CORRECT_POSITIONS
+    for index, item in enumerate(items):
+        options = item.get("options")
+        if not isinstance(options, list) or len(options) < 4:
+            continue
+        target = indexes[index % len(indexes)]
+        current = item.get("correctIndex", 0)
+        if isinstance(current, int) and 0 <= current < len(options) and current != target:
+            options[current], options[target] = options[target], options[current]
+            item["correctIndex"] = target
+    return items
+
+
+def _warmup_model_context(model):
+    model = model if isinstance(model, dict) else {}
+    model_url = str(model.get("glbUrl") or model.get("modelUrl") or "").strip()
+    parts = model.get("parts") or model.get("partDetails") or []
+    normalized = []
+    for part in parts:
+        if isinstance(part, str):
+            normalized.append({"key": part, "name": part})
+        elif isinstance(part, dict):
+            key = part.get("partKey") or part.get("key") or part.get("name")
+            name = part.get("partLabel") or part.get("name") or key
+            if key and name:
+                normalized.append({"key": str(key), "name": str(name)})
+    return model_url, normalized[:16]
+
+
+def _warmup_question_schema():
+    return {
+        "type": "object",
+        "properties": {
+            "questions": {
+                "type": "array",
+                "minItems": 5,
+                "maxItems": 5,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "type": {"type": "string"},
+                        "question": {"type": "string"},
+                        "options": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"type": "string"}},
+                        "correctIndex": {"type": "integer"},
+                        "explanation": {"type": "string"},
+                        "difficulty": {"type": "string"},
+                        "partKeys": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["type", "question", "options", "correctIndex", "explanation", "difficulty", "partKeys"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["questions"],
+        "additionalProperties": False,
+    }
+
+
+def _validate_warmup_ai(value, valid_part_keys, has_model, expected_types=None):
+    questions = value.get("questions") if isinstance(value, dict) else None
+    if not isinstance(questions, list) or len(questions) != 5:
+        return "必须返回恰好 5 道题"
+    expected_types = expected_types or WARMUP_TYPES
+    for index, item in enumerate(questions):
+        if not isinstance(item, dict):
+            return f"第 {index + 1} 题不是对象"
+        if item.get("type") != expected_types[index]:
+            return f"第 {index + 1} 题类型必须是“{expected_types[index]}”"
+        question = str(item.get("question") or "").strip()
+        explanation = str(item.get("explanation") or "").strip()
+        options = item.get("options")
+        if not question or not explanation:
+            return f"第 {index + 1} 题题干和解析不能为空"
+        if not isinstance(options, list) or len(options) != 4 or any(not str(option).strip() for option in options):
+            return f"第 {index + 1} 题必须有 4 个有效选项"
+        if len({str(option).strip() for option in options}) != 4:
+            return f"第 {index + 1} 题不能有重复选项"
+        if not isinstance(item.get("correctIndex"), int) or not 0 <= item["correctIndex"] < 4:
+            return f"第 {index + 1} 题正确答案无效"
+        if item.get("difficulty") not in ("基础", "进阶"):
+            return f"第 {index + 1} 题难度必须是基础或进阶"
+        part_keys = item.get("partKeys")
+        if not isinstance(part_keys, list) or any(key not in valid_part_keys for key in part_keys):
+            return f"第 {index + 1} 题引用了不存在的模型部件"
+        if not has_model and part_keys:
+            return f"无模型课程的第 {index + 1} 题不能引用模型部件"
+    return None
+
+
+def _warmup_with_metadata(items, lesson, model_url, generation):
+    alignment = lesson.get("alignmentMatrix") or []
+    result = []
+    for index, item in enumerate(items[:5]):
+        part_keys = item.get("partKeys") or item.get("modelPartKeys") or []
+        alignment_item = alignment[index % len(alignment)] if alignment and isinstance(alignment[index % len(alignment)], dict) else {}
+        objective_id = alignment_item.get("objectiveId")
+        activity_ids = alignment_item.get("activityIds") or []
+        result.append({
+            "id": item.get("id") or f"warmup-{lesson.get('id') or uuid.uuid4().hex}-{index + 1}",
+            "modelUrl": model_url if part_keys else "",
+            "subject": str((lesson.get("request") or {}).get("subject") or "生物"),
+            "category": "model-warmup",
+            "question": item["question"],
+            "options": item["options"],
+            "correctIndex": item["correctIndex"],
+            "explanation": item["explanation"],
+            "optionType": 4,
+            "modelPartKeys": part_keys,
+            "lessonId": str(lesson.get("id") or ""),
+            "difficulty": item["difficulty"],
+            "enabled": item.get("enabled", True),
+            "source": item.get("source", "generated"),
+            "objectiveIds": item.get("objectiveIds") or ([objective_id] if objective_id else []),
+            "activityId": item.get("activityId") or (activity_ids[0] if activity_ids else ""),
+        })
+    return result
+
+
+def generate_warmup_with_ollama(payload, current_questions=None, regenerate_index=None):
+    lesson = payload.get("lessonPlan") or {}
+    model_url, normalized_parts = _warmup_model_context(payload.get("model"))
+    has_model = bool(model_url and normalized_parts)
+    valid_part_keys = {item["key"] for item in normalized_parts}
+    template = generate_warmup_questions(payload)
+    teacher_questions = current_questions if isinstance(current_questions, list) else []
+    expected_types = list(WARMUP_TYPES)
+    if regenerate_index is not None:
+        regenerate_index = max(0, min(4, int(regenerate_index)))
+        expected_types = [WARMUP_TYPES[regenerate_index]]
+
+    model_summary = [{"key": item["key"], "name": item["name"]} for item in normalized_parts]
+    questions_context = [
+        {"question": item.get("question"), "type": WARMUP_TYPES[index] if index < 5 else ""}
+        for index, item in enumerate(teacher_questions)
+        if index != regenerate_index
+    ]
+    prompt = {
+        "task": "生成练习题，不是正式考试题",
+        "course": {
+            "title": lesson.get("title"),
+            "subject": (lesson.get("request") or {}).get("subject"),
+            "grade": (lesson.get("request") or {}).get("grade"),
+            "abilityLevel": (lesson.get("request") or {}).get("abilityLevel"),
+            "duration": (lesson.get("request") or {}).get("duration"),
+        },
+        "objectives": lesson.get("objectives") or lesson.get("learningOutcomes") or [],
+        "activities": lesson.get("activities") or [],
+        "alignmentMatrix": lesson.get("alignmentMatrix") or [],
+        "sourceMaterial": str((lesson.get("request") or {}).get("materialText") or "")[:6000],
+        "modelParts": model_summary if has_model else [],
+        "requiredTypes": expected_types,
+        "avoidRepeating": questions_context,
+        "rules": [
+            "每题必须有 4 个互不重复的选项和 1 个正确答案",
+            "解析必须说明为什么正确，并服务于课堂练习",
+            "没有模型时 partKeys 必须为空，不能编造部件",
+            "只使用提供的课程资料、教案和模型部件，不补写未经依据的医学事实",
+        ],
+    }
+
+    def validate(value):
+        return _validate_warmup_ai(value, valid_part_keys, has_model, expected_types)
+
+    result, error = ollama_adapter.generate_json(
+        "你是严谨的生物医学教师。生成适合课堂开始阶段的可编辑选择题。只返回符合要求的 JSON，不输出解释文字。",
+        json.dumps(prompt, ensure_ascii=False),
+        validator=validate,
+        timeout=180,
+        format_schema=_warmup_question_schema(),
+    )
+    if result is None:
+        fallback = template[regenerate_index:regenerate_index + 1] if regenerate_index is not None else template
+        fallback_generation = {"engine": "builtin-template", "model": ollama_adapter.DEFAULT_MODEL, "message": f"本地模型回退：{error}"}
+        return fallback, fallback_generation, [fallback_generation["message"]]
+
+    ai_items = []
+    for item in result["questions"]:
+        ai_items.append({
+            "question": item["question"].strip(),
+            "options": [str(option).strip() for option in item["options"]],
+            "correctIndex": item["correctIndex"],
+            "explanation": item["explanation"].strip(),
+            "partKeys": item.get("partKeys") or [],
+            "difficulty": item["difficulty"],
+        })
+    if regenerate_index is not None:
+        _spread_warmup_answers(ai_items, WARMUP_CORRECT_POSITIONS[regenerate_index:regenerate_index + 1])
+        generated = template.copy()
+        generated[regenerate_index] = ai_items[0]
+        return generated, {"engine": "ollama", "model": ollama_adapter.DEFAULT_MODEL, "message": f"已使用 {ollama_adapter.DEFAULT_MODEL} 重新生成第 {regenerate_index + 1} 题"}, []
+    _spread_warmup_answers(ai_items)
+    merged = []
+    for index, item in enumerate(ai_items):
+        if index < len(teacher_questions) and teacher_questions[index].get("source") == "teacher-edited":
+            merged.append(teacher_questions[index])
+        else:
+            merged.append(item)
+    warnings = ["已保留教师编辑题目，未自动覆盖"] if any(item.get("source") == "teacher-edited" for item in teacher_questions) else []
+    return merged, {"engine": "ollama", "model": ollama_adapter.DEFAULT_MODEL, "message": f"已使用 {ollama_adapter.DEFAULT_MODEL} 生成 5 道练习题"}, warnings
 
 
 def parse_multipart(body, content_type, allow_multiple=False):
@@ -131,42 +430,227 @@ def build_multipart_many(fields, images):
 
 
 MULTIVIEW_KEYS = ("front", "left", "right", "back")
+MULTIVIEW_LABELS = {"front": "正面", "left": "左侧", "right": "右侧", "back": "背面"}
 
 
-def sf3d_config():
+def hunyuan3d_config():
     return (
-        env_value("SF3D_BASE_URL", "https://bios-pleasant-meet-feed.trycloudflare.com").rstrip("/"),
-        env_value("SF3D_API_KEY"),
+        env_value("HUNYUAN3D_BASE_URL", "https://tokenhub.tencentmaas.com").rstrip("/"),
+        env_value("HUNYUAN3D_API_KEY"),
+        env_value("HUNYUAN3D_MODEL", "hy-3d-3.1"),
     )
 
 
-def generate_sf3d(image, fields, view_label):
-    base_url, api_key = sf3d_config()
-    if not api_key:
-        raise RuntimeError("未配置 SF3D_API_KEY，无法使用参考 HTML 的真实图生 3D 接口")
-    request_fields = {
-        key: fields[key]
-        for key in ("texture_resolution", "remove_bg", "foreground_ratio", "vertex_count", "remesh")
-        if fields.get(key) not in (None, "")
-    }
-    body, content_type = build_multipart(request_fields, image)
+def _hunyuan_json_request(path, payload, api_key, timeout=60):
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = Request(
-        f"{base_url}/v1/generate-sync",
+        path,
         data=body,
-        headers={"Content-Type": content_type, "X-API-Key": api_key, "Accept": "model/gltf-binary"},
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}", "Accept": "application/json"},
         method="POST",
     )
     try:
-        with urlopen(request, timeout=900) as response:
-            result = response.read()
+        with urlopen(request, timeout=timeout) as response:
+            raw = response.read()
     except HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")[-800:]
-        raise RuntimeError(f"SF3D {view_label} 重建失败（HTTP {error.code}）：{detail}") from error
+        detail = error.read().decode("utf-8", errors="replace")[-1200:]
+        raise RuntimeError(f"混元 3D 接口失败（HTTP {error.code}）：{detail.replace(api_key, '[redacted]')}") from error
     except URLError as error:
-        raise RuntimeError(f"SF3D 服务不可达：{error.reason}") from error
-    if not result.startswith(b"glTF"):
-        raise RuntimeError("SF3D 返回的内容不是有效 GLB")
+        raise RuntimeError(f"混元 3D 服务不可达：{error.reason}") from error
+    try:
+        result = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("混元 3D 返回了无法解析的响应") from error
+    if not isinstance(result, dict):
+        raise RuntimeError("混元 3D 返回格式无效")
     return result
+
+
+def _hunyuan_download_glb(url):
+    parsed = urlparse(url)
+    if parsed.scheme != 'https' or not parsed.hostname or not parsed.hostname.endswith(('.tencentcos.cn', '.myqcloud.com')) or parsed.username or parsed.password:
+        raise RuntimeError('混元返回了非允许的模型下载地址，已阻止下载')
+    last_error = None
+    for attempt in range(1, 4):
+        try:
+            context = ssl.create_default_context()
+            # Some Tencent COS edge nodes intermittently close TLS 1.3 handshakes
+            # from the bundled Windows/OpenSSL runtime; keep certificate checks
+            # enabled and use TLS 1.2 for the fallback connection.
+            if attempt > 1:
+                context.maximum_version = ssl.TLSVersion.TLSv1_2
+            request = Request(url, headers={
+                "Accept": "application/octet-stream",
+                "Connection": "close",
+            })
+            # COS download URLs occasionally close an idle TLS connection before
+            # the body arrives. A fresh verified connection makes this recoverable.
+            with urlopen(request, timeout=120, context=context) as response:
+                result = response.read()
+            if len(result) < 12 or not result.startswith(b"glTF") or struct.unpack_from("<II", result, 4) != (2, len(result)):
+                raise RuntimeError("混元 3D 返回的文件不是完整有效的 GLB")
+            return result
+        except HTTPError as error:
+            last_error = error
+            if error.code < 500 or attempt == 3:
+                if error.code < 500:
+                    detail = error.read().decode("utf-8", errors="replace")[-600:]
+                    raise RuntimeError(f"混元 3D 模型文件下载失败（HTTP {error.code}）：{detail}") from error
+        except (URLError, TimeoutError, ssl.SSLError) as error:
+            last_error = error
+        time.sleep(attempt * 1.5)
+    # Signed URLs are passed as data, never interpolated into shell commands.
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix="hunyuan-", suffix=".glb", delete=False) as temporary:
+            temporary_path = temporary.name
+        native_environment = os.environ.copy()
+        native_environment["HUNYUAN_DOWNLOAD_URL"] = url
+        native_environment["HUNYUAN_DOWNLOAD_OUT"] = temporary_path
+        node = shutil.which("node.exe") or shutil.which("node")
+        if not node:
+            raise RuntimeError("未找到 Node.js，无法执行备用模型下载")
+        completed = subprocess.run(
+            [node, str(Path(__file__).with_name("download_hunyuan.mjs"))],
+            env=native_environment,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        if completed.returncode == 0:
+            result = Path(temporary_path).read_bytes()
+        else:
+            detail = (completed.stderr or completed.stdout or str(last_error)).strip()[-600:]
+            # The provider output is still valid and signed. Let the browser
+            # fetch it directly when this machine cannot reach the COS edge.
+            return {"remoteUrl": url, "downloadError": detail}
+    except (OSError, subprocess.SubprocessError, RuntimeError) as error:
+        raise RuntimeError(f"混元 3D 模型文件下载失败：{error}") from error
+    finally:
+        if temporary_path:
+            Path(temporary_path).unlink(missing_ok=True)
+    if len(result) < 12 or not result.startswith(b"glTF") or struct.unpack_from("<II", result, 4) != (2, len(result)):
+        raise RuntimeError("混元 3D 返回的文件不是完整有效的 GLB")
+    return result
+
+
+_hunyuan_slots = threading.BoundedSemaphore(3)
+
+
+def generate_hunyuan3d(image, fields, view_label, multiview_images=None):
+    if not _hunyuan_slots.acquire(blocking=False):
+        raise RuntimeError('已有三个混元任务正在处理，请等待完成后再提交')
+    try:
+        return _generate_hunyuan3d(image, fields, view_label, multiview_images=multiview_images)
+    finally:
+        _hunyuan_slots.release()
+
+
+def _encode_hunyuan_image(image, label, max_encoded_bytes=6 * 1024 * 1024):
+    try:
+        with Image.open(io.BytesIO(image["content"])) as source:
+            if source.format not in ("JPEG", "PNG", "WEBP") or not all(128 <= size <= 5000 for size in source.size):
+                raise ValueError(f"{label}图片须为 PNG/JPG/WebP，单边尺寸 128 至 5000 像素")
+            source.verify()
+    except (OSError, ValueError) as error:
+        raise ValueError(f"{label}图片无效：{error}") from error
+
+    # Four Base64 images share the provider's 10 MB JSON body limit. Re-encode
+    # multiview inputs into bounded JPEGs so users do not need to resize them.
+    with Image.open(io.BytesIO(image["content"])) as source:
+        source = ImageOps.exif_transpose(source)
+        if source.mode in ("RGBA", "LA") or "transparency" in source.info:
+            canvas = Image.new("RGB", source.size, "white")
+            alpha = source.getchannel("A") if "A" in source.getbands() else None
+            canvas.paste(source.convert("RGBA"), mask=alpha)
+            source = canvas
+        else:
+            source = source.convert("RGB")
+        source.thumbnail((1536, 1536), Image.Resampling.LANCZOS)
+        quality = 84
+        encoded = ""
+        while quality >= 52:
+            output = io.BytesIO()
+            source.save(output, format="JPEG", quality=quality, optimize=True, progressive=True)
+            encoded = base64.b64encode(output.getvalue()).decode("ascii")
+            if len(encoded) <= max_encoded_bytes:
+                return encoded
+            quality -= 8
+
+        # Extremely detailed images may still exceed the budget after quality
+        # reduction; shrink once more and encode at a readable fallback quality.
+        source.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+        output = io.BytesIO()
+        source.save(output, format="JPEG", quality=60, optimize=True, progressive=True)
+        encoded = base64.b64encode(output.getvalue()).decode("ascii")
+        if len(encoded) > max_encoded_bytes:
+            raise ValueError(f"{label}图片压缩后仍超过混元请求限制，请使用更小的图片")
+        return encoded
+
+
+def _validate_hunyuan_image(image, label, max_encoded_bytes=6 * 1024 * 1024):
+    return _encode_hunyuan_image(image, label, max_encoded_bytes=max_encoded_bytes)
+
+
+def _generate_hunyuan3d(image, fields, view_label, multiview_images=None):
+    base_url, api_key, model = hunyuan3d_config()
+    if not api_key:
+        raise RuntimeError("未配置 HUNYUAN3D_API_KEY，无法调用混元 3D")
+    if model not in ('hy-3d-3.0', 'hy-3d-3.1'):
+        raise ValueError('混元模型版本无效')
+    image_budget = 1_900_000 if multiview_images else 6 * 1024 * 1024
+    encoded = _validate_hunyuan_image(image, view_label, max_encoded_bytes=image_budget)
+    payload = {
+        "model": model,
+        "image_base64": encoded,
+        "enable_pbr": True,
+        "generate_type": "Normal",
+        "face_count": 1500000,
+    }
+    if multiview_images:
+        payload["multi_view_images"] = [
+            {
+                "view_type": item["field"],
+                "view_image_base64": _validate_hunyuan_image(item, MULTIVIEW_LABELS[item["field"]], max_encoded_bytes=image_budget),
+            }
+            for item in multiview_images
+        ]
+    # Retry the existing provider task for identical inputs after download failure.
+    fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+    task_directory = OUTPUT_DIR / "hunyuan-tasks"
+    task_directory.mkdir(exist_ok=True)
+    task_path = task_directory / f"{fingerprint}.json"
+    stored_task = json.loads(task_path.read_text(encoding="utf-8")) if task_path.exists() else {}
+    if stored_task.get("id") and stored_task.get("fingerprint") == fingerprint:
+        response = _hunyuan_json_request(f"{base_url}/v1/api/3d/query", {"model": model, "id": str(stored_task["id"])}, api_key)
+    else:
+        response = _hunyuan_json_request(f"{base_url}/v1/api/3d/submit", payload, api_key)
+    task_id = response.get("id")
+    if not task_id:
+        task_id = stored_task.get("id")
+    if not task_id:
+        raise RuntimeError("混元 3D 未返回任务编号")
+    task_path.write_text(json.dumps({"id": str(task_id), "model": model, "fingerprint": fingerprint}), encoding="utf-8")
+    deadline = time.monotonic() + 900
+    status = response.get("status", "queued")
+    while status in {"queued", "in_progress"}:
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"混元 3D {view_label}任务处理超时（任务号：{task_id}）")
+        time.sleep(4)
+        queried = _hunyuan_json_request(f"{base_url}/v1/api/3d/query", {"model": model, "id": str(task_id)}, api_key)
+        status = queried.get("status", "")
+        if status == "failed":
+            raise RuntimeError(f"混元 3D {view_label}任务失败：{queried.get('message') or queried.get('error') or queried}")
+        response = queried
+    if status != "completed":
+        raise RuntimeError(f"混元 3D {view_label}任务返回未知状态：{status}")
+    files = response.get("data") or []
+    glb = next((item for item in files if item.get("type") == "glb" and item.get("url")), None)
+    if not glb:
+        raise RuntimeError("混元 3D 任务完成，但响应中没有 GLB 文件")
+    task_path.write_text(json.dumps({"id": str(task_id), "model": model, "url": glb["url"]}), encoding="utf-8")
+    return _hunyuan_download_glb(glb["url"])
 
 
 def _looks_like_heart(images):
@@ -193,68 +677,76 @@ def parse_multiview(body, content_type):
     return fields, [by_view[key] for key in MULTIVIEW_KEYS]
 
 
-def generate_image_model(body, content_type, mode):
-    sf3d_base, sf3d_key = sf3d_config()
-    sf3d_fallback_warning = None
-    if sf3d_key:
-        if mode == "multiview":
-            fields, images = parse_multiview(body, content_type)
-            image = next(item for item in images if item["field"] == "front")
-            source_label = "SF3D API four-view request, front reference reconstruction"
-            view_label = "正面图"
-        else:
-            fields, image = parse_multipart(body, content_type)
-            source_label = "SF3D API single-image reconstruction"
-            view_label = "单图"
+def package_reconstruction(result, source_label, mode, fields, view_payloads=None):
+    separation_mode = fields.get("separationMode", fields.get("separation_mode", "geometric"))
+    if separation_mode != "anatomical":
+        return attach_standard_views(image_model.package_glb(result, source_label, mode))
+    organ_type = fields.get("organType", fields.get("organ_type", ""))
+    anatomy_profile = fields.get("anatomyProfile", fields.get("anatomy_profile", ""))
+    if organ_type != "heart" or anatomy_profile not in ("heart-v1", "heart-v2"):
+        raise ValueError("医学语义拆解仅支持 heart / heart-v2（兼容 heart-v1），未执行普通几何回退")
+    return attach_standard_views(heart_anatomy.package(result, source_label, mode, view_payloads=view_payloads))
+
+
+def attach_standard_views(result):
+    model_url = result.get('appearanceUrl') or result.get('glbUrl')
+    if model_url and model_url.startswith('/api/'):
         try:
-            result = generate_sf3d(image, fields, view_label)
-        except RuntimeError as error:
-            if not triposr_local.available():
-                raise
-            sf3d_fallback_warning = f"SF3D 服务不可用，已自动改用本地 TripoSR：{error}"
-        else:
-            packaged = image_model.package_glb(result, source_label, mode)
-            packaged["engine"] = "sf3d-api"
-            packaged["qualityTier"] = "sf3d-reference"
-            packaged["paidApi"] = False
-            packaged["sourceApi"] = sf3d_base
-            packaged.setdefault("warnings", []).append(
-                "当前 SF3D 接口只使用正面参考图进行重建；其他视角会随任务保存，但不属于真正的多视图融合。"
-                if mode == "multiview" else
-                "模型外观以 SF3D 返回的 GLB 为准；部件拆分由 PartField 和 Blender 继续处理。"
-            )
-            return 200, "application/json; charset=utf-8", json.dumps(packaged, ensure_ascii=False).encode("utf-8")
-    if mode == "multiview":
-        _fields, images = parse_multiview(body, content_type)
-        if _looks_like_heart(images):
-            template = ROOT.parent / "public" / "models" / "heart-optimized.glb"
-            if template.is_file():
-                result = template.read_bytes()
-                source_label = "Local built-in heart anatomy template matched from reference views"
-                packaged = image_model.package_glb(result, source_label, mode)
-                packaged["engine"] = "local-heart-template"
-                packaged["qualityTier"] = "template-matched-editable"
-                packaged["paidApi"] = False
-                packaged.setdefault("warnings", []).append("已根据红蓝心脏参考图匹配本机内置心脏模板；模型部件可编辑，但并非从图片逐像素重建。")
-                return 200, "application/json; charset=utf-8", json.dumps(packaged, ensure_ascii=False).encode("utf-8")
-        # The former visual-hull path produced the block model shown in the UI.
-        # Use the local neural reconstruction for the front view until a true
-        # multi-image neural fusion model is installed; never expose the voxel
-        # hull as a successful high-quality result.
-        front = next(image for image in images if image["field"] == "front")
-        result = triposr_local.reconstruct(front["content"])
-        source_label = "TripoSR local four-view front-priority reconstruction"
+            prepared = courseware.prepare_model_views({'model': {'modelUrl': model_url}, 'scenes': [{'model': {}}]})
+            result.update({key: value for key, value in prepared.items() if key != 'status'})
+            result['viewStatus'] = 'ready'
+        except (ValueError, RuntimeError, OSError) as exc:
+            result['viewStatus'] = 'failed'
+            result['viewError'] = str(exc)
+            result['viewImageUrls'] = {}
+    return result
+
+
+def generate_image_model(body, content_type, mode):
+    base_url, api_key, model = hunyuan3d_config()
+    if not api_key:
+        raise RuntimeError("HUNYUAN3D_API_KEY 未配置；建模已锁定混元，不会回退")
+    if mode == "single":
+        fields, image = parse_multipart(body, content_type)
+        result = generate_hunyuan3d(image, fields, "单图")
+        views_used = ["front"]
     else:
-        _fields, image = parse_multipart(body, content_type)
-        result = triposr_local.reconstruct(image["content"])
-        source_label = "TripoSR local single-image reconstruction"
-    packaged = image_model.package_glb(result, source_label, mode)
-    packaged["engine"] = "triposr-local-front-priority" if mode == "multiview" else "triposr-local"
-    packaged["qualityTier"] = "neural-reconstruction-front-priority" if mode == "multiview" else "neural-reconstruction"
-    packaged["paidApi"] = False
-    if sf3d_fallback_warning:
-        packaged.setdefault("warnings", []).append(sf3d_fallback_warning)
-    packaged.setdefault("warnings", []).append("外观重建不等于医学解剖重建；隐藏结构和解剖语义拆件需要人工校核。" if mode == "single" else "当前使用正面图进行本机神经重建，其他视角已保存但尚未进行真正的多视图神经融合；未完成语义拆件。")
+        fields, images = parse_multiview(body, content_type)
+        by_view = {image["field"]: image for image in images}
+        result = generate_hunyuan3d(
+            by_view["front"],
+            fields,
+            "正面",
+            multiview_images=[by_view[key] for key in ("left", "right", "back")],
+        )
+        views_used = list(MULTIVIEW_KEYS)
+    # Preserve the provider GLB exactly; never assemble anatomy or split regions.
+    directory = OUTPUT_DIR / "hunyuan3d" / uuid.uuid4().hex
+    directory.mkdir(parents=True)
+    path = directory / "model.glb"
+    remote_url = result.get("remoteUrl") if isinstance(result, dict) else ""
+    if remote_url:
+        url = remote_url
+        message_suffix = "当前网络无法下载本地副本，已保留混元签名模型地址供浏览器直接加载。"
+    else:
+        path.write_bytes(result)
+        url = "/api/3d/download/" + path.relative_to(OUTPUT_DIR).as_posix()
+        message_suffix = "模型文件已保存到本地。"
+    packaged = attach_standard_views({
+        "status": "generated", "editable": True, "glbUrl": url,
+        "appearanceUrl": url, "blendUrl": "", "previewUrl": "",
+        "parts": [], "anatomyDisplayAvailable": False,
+        "modelKind": "hunyuan3d-appearance", "engine": "hunyuan3d",
+        "model": model, "paidApi": True, "sourceApi": base_url,
+        "viewsUsed": views_used, "inputViewCount": len(views_used), "qualityTier": "provider-output-unreviewed",
+        "message": f"混元 3D 原始模型；已使用{len(views_used)}个视角输入，未添加模板、未自动拆件。{message_suffix}",
+        "workflow": ["hunyuan3d", "preserve-original-glb", "four-view-input" if mode != "single" else "single-view-input", "standard-view-render"],
+    })
+    packaged["previewUrl"] = (packaged.get("viewImageUrls") or {}).get("front", "")
+    if packaged.get("viewStatus") and packaged.get("viewStatus") != "ready":
+        packaged["status"] = "needs_review"
+        packaged["warnings"] = [packaged.get("viewError", "模型截图未通过检查")]
+    (directory / "manifest.json").write_text(json.dumps(packaged, ensure_ascii=False), encoding="utf-8")
     return 200, "application/json; charset=utf-8", json.dumps(packaged, ensure_ascii=False).encode("utf-8")
 
 
@@ -369,8 +861,9 @@ def parse_material(body, content_type):
 
 
 def visual_profile(request):
+    benchmark = teaching_benchmarks.benchmark_profile(request)
     if request.get("stage") == "本科":
-        return {"stage": "本科", "subject": "生物医学", "density": "balanced", "theme": "医学高对比", "visualLanguage": "器官标注、结构功能关系、机制箭头、病例证据链", "assetQueries": []}
+        return {"stage": "本科", "subject": "生物医学", "density": "balanced", "theme": "医学高对比", "visualLanguage": "器官标注、结构功能关系、机制箭头、病例证据链", "assetQueries": [], "benchmark": benchmark}
     subject = str(request.get("subject") or "").strip()
     stage = str(request.get("stage") or request.get("grade") or "").strip()
     if stage.startswith("小学") or "一" in stage or "二" in stage or "三" in stage or "四" in stage or "五" in stage or "六" in stage:
@@ -389,16 +882,16 @@ def visual_profile(request):
     theme = request.get("pptTheme") or "自动推荐"
     if theme == "自动推荐":
         theme = "考试复习" if "复习" in str(request.get("lessonType") or "") else "课堂故事化"
-    return {"stage": stage, "subject": subject, "density": density, "theme": theme, **selected}
+    return {"stage": stage, "subject": subject, "density": density, "theme": theme, **selected, "benchmark": benchmark}
 
 
 def build_lesson(request):
     if request.get("stage") == "本科":
-        return biomed_curriculum.build_lesson(request)
+        return lesson_design.generate_draft(request, request.get("designMode") or "quick", request.get("modelAsset"))["lessonPlan"]
     subject = request.get("subject") or "未设置学科"
     grade = request.get("grade") or request.get("stage") or "未设置年级"
     topic = request.get("topic") or "待确定课题"
-    duration = max(20, min(120, int(request.get("duration") or 45)))
+    duration = max(20, min(120, int(request.get("duration") or 40)))
     objectives = clean_lines(request.get("objectives"), "理解本节课的核心概念并完成迁移应用")
     key_points = clean_lines(request.get("keyPoints"), "建立概念、方法与实际问题之间的联系")
     difficulties = clean_lines(request.get("difficulties"), "把抽象知识转化为可操作的解题或探究步骤")
@@ -433,15 +926,17 @@ def build_lesson(request):
         {"time": allocations[4], "name": "回扣与评价", "teacher": f"回到“{question}”，以出口条收集学习证据。", "student": "回答核心问题并写下仍未解决的疑问。", "check": assessment},
     ]
     profile = visual_profile(request)
+    benchmark = profile["benchmark"]
+    experience = benchmark["experience"]
     layout_by_kind = {
         "封面": "hero-stack", "问题": "question-split", "探索": "three-column", "教材": "source-quote",
         "概念": "layer-map", "方法": "step-flow", "辨析": "compare-duo", "练习": "task-timer",
-        "揭示": "answer-rail", "考点": "exam-map", "观察": "observation-stage", "总结": "loop-summary", "作业": "take-home",
+        "揭示": "answer-rail", "考点": "exam-map", "观察": "observation-stage", "互动": experience["mode"], "总结": "loop-summary", "作业": "take-home",
     }
     proof_by_kind = {
         "封面": "visual-anchor", "问题": "question-prompt", "探索": "comparison-cards", "教材": "source-excerpt",
         "概念": "hierarchy-diagram", "方法": "step-sequence", "辨析": "claim-comparison", "练习": "answer-area",
-        "揭示": "evidence-rail", "考点": "topic-map", "观察": "observation-task", "总结": "question-loop", "作业": "task-list",
+        "揭示": "evidence-rail", "考点": "topic-map", "观察": "observation-task", "互动": "student-action", "总结": "question-loop", "作业": "task-list",
     }
     def page(kind, title, items, purpose, visual, interaction="", asset_query="", layout_override=""):
         return {
@@ -455,6 +950,7 @@ def build_lesson(request):
     slides = [page("封面", topic, [f"{grade} · {subject} · {lesson_type}"], question, "核心问题作为视觉主角"),
               page("问题", "从一个问题开始", [question, f"你已经知道：{prior}"], "提出驱动全课的疑问", "大号问题与观察区域", "先独立猜想，再交流理由"),
               page("探索", "观察与发现", [key_points[0], f"尝试用已有知识解释：{prior}"], "从现象走向规律", "对比区与连接线", "说出相同与不同"),
+              page("互动", experience["title"], experience["actions"], "让学生通过可见动作产生学习证据", "控制区、主画布与实时反馈", experience["feedback"], layout_override=experience["mode"]),
               page("概念", "建立核心认识", key_points, "明确概念与适用范围", "层级关系图"),
               page("方法", "怎样一步步解决", [difficulties[0], *objectives[:2]], "示范解决路径", "三步推理路线", "先补出缺失的一步"),
               page("辨析", "这个判断对吗？", [errors[0], "指出错误依据，并给出修正说法"], "暴露并修正常见误区", "双栏观点对照", "先投票后解释")]
@@ -492,6 +988,7 @@ def build_lesson(request):
         "blackboard": [topic, key_points[0], "条件 → 方法 → 结论"],
         "slides": slides,
         "visualProfile": profile,
+        "generationStandard": benchmark,
     }
 
 
@@ -501,13 +998,7 @@ def color(value):
 
 
 def add_text(slide, value, x, y, w, h, size=18, fill="FFFFFF", bold=False, align=PP_ALIGN.LEFT):
-    box = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
-    tf = box.text_frame
-    tf.clear(); tf.word_wrap = True; tf.vertical_anchor = MSO_ANCHOR.MIDDLE
-    tf.margin_left = tf.margin_right = Inches(0.08); tf.margin_top = tf.margin_bottom = Inches(0.03)
-    p = tf.paragraphs[0]; p.alignment = align
-    run = p.add_run(); run.text = str(value); run.font.name = "Microsoft YaHei"; run.font.size = Pt(size); run.font.bold = bold; run.font.color.rgb = color(fill)
-    return box
+    return courseware._add_text(slide, value, x, y, w, h, size, fill.replace('#', ''), bold, align)
 
 
 def add_shape(slide, kind, x, y, w, h, fill, line_color=None, transparency=0):
@@ -534,7 +1025,11 @@ def expanded_slides(plan):
 
 def quality_check(plan):
     if plan.get("courseProfile", {}).get("stage") == "本科":
-        return biomed_slides.quality(plan)
+        slide_quality = biomed_slides.quality(plan)
+        design_quality = lesson_design.validate_lesson(plan, require_approval=True)
+        blocking = [*design_quality["blocking"], *slide_quality["blocking"]]
+        warnings = [*design_quality["warnings"], *slide_quality["warnings"]]
+        return {**slide_quality, "blocking": blocking, "warnings": warnings, "score": max(0, 100 - len(blocking) * 25 - len(warnings) * 5), "designQuality": design_quality}
     slides = expanded_slides(plan)
     warnings = []
     blocking = []
@@ -556,9 +1051,17 @@ def quality_check(plan):
         if layouts[index] == layouts[index - 1]:
             warnings.append({"code": "repeated-layout", "slide": index + 1, "message": "连续页面使用了相同版式"})
     types = {slide.get("type") for slide in slides}
-    for required in ("问题", "练习", "总结"):
+    for required in ("问题", "总结"):
         if required not in types:
             warnings.append({"code": f"missing-{required}", "message": f"课件缺少{required}页"})
+    if not ({"练习", "检测"} & types):
+        warnings.append({"code": "missing-practice", "message": "课件缺少练习或检测页"})
+    if not any(slide.get("type") in ("互动", "观察") for slide in slides):
+        warnings.append({"code": "missing-interaction", "message": "课件缺少学生可操作的实验、角色或挑战任务"})
+    if not any(slide.get("type") in ("检测", "揭示") for slide in slides):
+        warnings.append({"code": "missing-feedback", "message": "课件缺少即时检测或答案依据反馈"})
+    if not any(slide.get("type") in ("检测", "作业") for slide in slides):
+        warnings.append({"code": "missing-transfer", "message": "课件缺少迁移任务"})
     score = max(0, min(100, 100 - len(blocking) * 35 - len(warnings) * 5))
     return {"score": score, "blocking": blocking, "warnings": warnings, "slideCount": len(slides), "layouts": sorted(set(layouts))}
 
@@ -608,6 +1111,17 @@ def render_preview_svg(slide, index, plan):
             parts.append(f'<rect x="{x}" y="250" width="320" height="250" rx="18" fill="#{surface}" stroke="#{accent}" stroke-width="2"/>')
             parts.append(svg_text(f"0{n + 1}", x + 24, 290, 27, accent, "700", 5))
             parts.append(svg_text(value, x + 24, 355, 21, ink, "700", 19))
+    elif layout in ("control-lab", "roleplay-stage", "game-challenge"):
+        label = {"control-lab": "CONTROL LAB", "roleplay-stage": "ROLE PLAY", "game-challenge": "CHALLENGE"}[layout]
+        parts.append(f'<rect x="72" y="230" width="300" height="330" rx="14" fill="#{surface}" stroke="#{accent}" stroke-width="2"/>')
+        parts.append(svg_text(label, 104, 278, 18, accent, "700", 18))
+        for n, value in enumerate(items[:3]):
+            parts.append(f'<rect x="104" y="{318 + n * 70}" width="230" height="8" rx="4" fill="#{accent}" opacity="{1 - n * .22}"/>')
+            parts.append(svg_text(f"0{n + 1}", 104, 354 + n * 70, 14, muted, "700", 5))
+        parts.append(f'<rect x="420" y="230" width="780" height="330" rx="14" fill="#{surface}" stroke="#{accent}" stroke-width="2"/>')
+        parts.append(f'<circle cx="810" cy="365" r="92" fill="none" stroke="#{accent}" stroke-width="5"/>')
+        parts.append(f'<path d="M710 430L770 380L824 405L914 290" fill="none" stroke="#{accent}" stroke-width="7"/>')
+        parts.append(svg_text(slide.get("interaction", "操作后立即核对证据"), 500, 510, 18, ink, "700", 32))
     elif layout in ("compare-duo", "source-quote"):
         for n in range(2):
             x = 72 + n * 600
@@ -731,7 +1245,7 @@ def create_ppt(plan):
         slide = prs.slides.add_slide(prs.slide_layouts[6])
         slide.background.fill.solid(); slide.background.fill.fore_color.rgb = color(bg)
         original_kind = item.get("type", "教学页"); title = item.get("title", "课堂设计")
-        layout_kind = {"hero-stack": "封面", "question-split": "问题", "three-column": "探索", "source-quote": "教材", "layer-map": "概念", "step-flow": "方法", "compare-duo": "辨析", "task-timer": "练习", "evidence-list": "检测", "answer-rail": "揭示", "exam-map": "考点", "observation-stage": "观察", "loop-summary": "总结", "take-home": "作业"}
+        layout_kind = {"hero-stack": "封面", "question-split": "问题", "three-column": "探索", "source-quote": "教材", "layer-map": "概念", "step-flow": "方法", "compare-duo": "辨析", "task-timer": "练习", "evidence-list": "检测", "answer-rail": "揭示", "exam-map": "考点", "observation-stage": "观察", "control-lab": "互动实验", "roleplay-stage": "互动实验", "game-challenge": "互动实验", "loop-summary": "总结", "take-home": "作业"}
         kind = layout_kind.get(item.get("layout"), original_kind)
         purpose = item.get("purpose", ""); lead = items[0] if items else purpose
         chrome(slide, original_kind, index)
@@ -762,6 +1276,21 @@ def create_ppt(plan):
                 add_shape(slide, MSO_SHAPE.RECTANGLE, x + 0.24, 3.35, 2.8, 0.04, accent)
                 add_text(slide, short(content, 70), x + 0.24, 3.75, 2.85, 1.14, 16, ink, True)
                 add_text(slide, ["观察", "比较", "表达"][n], x + 0.24, 5.03, 1.4, 0.22, 10, muted)
+        elif kind == "互动实验":
+            mode = item.get("layout", "control-lab")
+            title_block(slide, title, "先产生预测，再用操作结果修正解释。")
+            panel(slide, 0.82, 2.30, 3.25, 3.35)
+            chip(slide, {"control-lab": "CONTROL", "roleplay-stage": "ROLE", "game-challenge": "CHALLENGE"}.get(mode, "ACTION"), 1.14, 2.62, 1.25)
+            for n, content in enumerate((items or [lead])[:3]):
+                y = 3.20 + n * 0.70
+                add_text(slide, f"0{n + 1}", 1.14, y, 0.42, 0.28, 13, accent, True)
+                add_text(slide, short(content, 42), 1.72, y - 0.03, 1.95, 0.52, 11, ink, True)
+            panel(slide, 4.48, 2.30, 7.65, 3.35)
+            add_text(slide, "LIVE LEARNING CANVAS", 4.84, 2.62, 3.2, 0.24, 10, accent, True)
+            for x, y, size in [(6.08, 3.28, 1.48), (7.64, 3.04, 1.05), (8.86, 3.55, 0.68)]:
+                shape = add_shape(slide, MSO_SHAPE.OVAL, x, y, size, size, surface, accent); shape.line.width = Pt(2)
+            add_shape(slide, MSO_SHAPE.CHEVRON, 7.18, 4.52, 1.18, 0.45, accent)
+            add_text(slide, short(item.get("interaction") or "观察变化，说明证据。", 88), 5.02, 5.02, 6.45, 0.36, 12, ink, True)
         elif kind == "教材":
             title_block(slide, title, "把资料原话变成课堂证据。")
             panel(slide, 0.82, 2.25, 7.35, 3.40)
@@ -902,6 +1431,22 @@ def create_ppt(plan):
     return output
 
 
+def add_verified_ppt_animations(output, plan):
+    """Add click-triggered animations and reject files with any static slide."""
+    scenes = [
+        {
+            "enabled": True,
+            "pptAnimation": slide.get("pptAnimation") or slide.get("animation") or "fade",
+        }
+        for slide in expanded_slides(plan)
+    ]
+    animation = courseware.add_powerpoint_animations(output, {"scenes": scenes})
+    if animation.get("status") != "animated" or animation.get("verified") is not True:
+        output.unlink(missing_ok=True)
+        raise RuntimeError(animation.get("message") or "PowerPoint 动画未通过逐页验收，未生成下载文件")
+    return animation
+
+
 class Handler(BaseHTTPRequestHandler):
     def _headers(self, content_type="application/json; charset=utf-8", length=None):
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -951,20 +1496,82 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_bytes(result, content_type, status)
                 return
             if request_path == "/api/3d/demo":
-                _fields, image = parse_multipart(body, self.headers.get("Content-Type", ""))
-                self.send_bytes(local_reconstruction.reconstruct_single(image["content"]), "model/gltf-binary")
-                return
+                raise RuntimeError("本地演示建模已停用，请使用 混元 3D 生成模型")
             if request_path == "/api/3d/multiview-demo":
-                _fields, images = parse_multiview(body, self.headers.get("Content-Type", ""))
-                self.send_bytes(local_reconstruction.reconstruct_multiview({image["field"]: image["content"] for image in images}), "model/gltf-binary")
-                return
+                raise RuntimeError("本地演示建模已停用，请使用 混元 3D 生成模型")
             payload = json.loads(body or b"{}")
-            if request_path == "/api/lesson/preview":
+            if request_path == "/api/warmup/generate":
+                items, generation, warnings = generate_warmup_with_ollama(payload, payload.get("currentQuestions"))
+                lesson = payload.get("lessonPlan") or {}
+                model_url, _parts = _warmup_model_context(payload.get("model"))
+                questions = _warmup_with_metadata(items, lesson, model_url, generation)
+                self.send_json({"questions": questions, "count": 5, "generation": generation, "warnings": warnings})
+            elif request_path == "/api/warmup/regenerate-question":
+                index = max(0, min(4, int(payload.get("index", 0))))
+                items, generation, warnings = generate_warmup_with_ollama(payload, payload.get("currentQuestions"), index)
+                lesson = payload.get("lessonPlan") or {}
+                model_url, _parts = _warmup_model_context(payload.get("model"))
+                questions = _warmup_with_metadata(items, lesson, model_url, generation)
+                self.send_json({"question": questions[index], "index": index, "generation": generation, "warnings": warnings})
+            elif request_path == "/api/lesson-design/generate-draft":
+                self.send_json(lesson_design.generate_draft(payload.get("request") or payload, payload.get("mode") or "quick", payload.get("model")))
+            elif request_path == "/api/lesson-design/generate-step":
+                self.send_json(lesson_design.generate_step(payload))
+            elif request_path == "/api/lesson-design/edit-step":
+                self.send_json(lesson_design.edit_step(payload))
+            elif request_path == "/api/lesson-design/sync-downstream":
+                self.send_json(lesson_design.sync_downstream(payload))
+            elif request_path == "/api/lesson-design/validate":
+                self.send_json(lesson_design.validate_payload(payload))
+            elif request_path == "/api/lesson-design/prepare-export":
+                prepared = lesson_design.prepare_teacher_lesson(payload)
+                status_code = 200 if prepared.get("draft") else 503
+                self.send_json(prepared, status_code)
+            elif request_path == "/api/courseware/generate":
+                lesson_plan = lesson_design.reconcile_model_capabilities(
+                    payload.get("lessonPlan") or payload,
+                    payload.get("model"),
+                )
+                if lesson_plan.get("courseProfile", {}).get("stage") == "本科":
+                    design_quality = lesson_design.validate_lesson(lesson_plan, require_approval=True)
+                    if design_quality["blocking"]:
+                        self.send_json({"error": "本科五步教案尚未通过审核", "quality": design_quality}, 400)
+                        return
+                manifest = courseware.build_manifest(
+                    lesson_plan,
+                    payload.get("model"),
+                    payload.get("questions"),
+                )
+                self.send_json({"manifest": manifest, "quality": manifest["quality"]})
+            elif request_path == "/api/courseware/regenerate-scene":
+                manifest = payload.get("manifest") or {}
+                scene_id = str(payload.get("sceneId") or "")
+                if not scene_id:
+                    raise ValueError("缺少场景编号")
+                updated = courseware.regenerate_scene(manifest, scene_id)
+                self.send_json({"manifest": updated, "quality": updated["quality"]})
+            elif request_path == "/api/courseware/export-zip":
+                manifest = payload.get("manifest") or {}
+                quality = courseware.quality(manifest)
+                if quality["blocking"]:
+                    self.send_json({"error": "互动课件质检发现阻断问题", "quality": quality}, 400)
+                    return
+                output = courseware.create_offline_zip(manifest)
+                self.send_json({"fileName": output.name, "downloadUrl": f"/api/courseware/download/{output.name}", "quality": quality})
+            elif request_path == "/api/courseware/prepare-views":
+                self.send_json(courseware.prepare_model_views(payload.get('manifest') or {}, bool(payload.get('checkOnly'))))
+            elif request_path == "/api/courseware/export-pptx":
+                manifest = payload.get("manifest") or {}
+                quality = courseware.quality(manifest)
+                if quality["blocking"]:
+                    self.send_json({"error": "互动课件质检发现阻断问题", "quality": quality}, 400)
+                    return
+                output, animation = courseware.create_ppt(manifest)
+                self.send_json({"fileName": output.name, "downloadUrl": f"/api/courseware/download/{output.name}", "quality": quality, "animation": animation, "sceneCount": animation.get("sceneCount"), "slideCount": animation.get("slideCount"), "aligned": animation.get("aligned", False), "modelViewCount": animation.get("modelViewCount", 0), "warnings": animation.get("warnings", [])})
+            elif request_path == "/api/lesson/preview":
                 self.send_json({"lessonPlan": build_lesson(payload)})
             elif request_path == "/api/biomed/model/generate":
-                model = payload.get("lessonPlan", {}).get("modelPlan", {})
-                result = biomed_models.generate_model(payload.get("modelKey") or model.get("modelKey", "heart"), payload.get("parts", model.get("parts")), payload.get("renderMode", model.get("renderMode", "exploded")))
-                self.send_json(result)
+                self.send_json({"error": "内置生物医学模型生成已停用，上传图片建模必须使用混元 3D"}, 410)
             elif request_path == "/api/course/generate-bundle":
                 plan = payload.get("lessonPlan") or build_lesson(payload)
                 if plan.get("courseProfile", {}).get("stage") != "本科":
@@ -974,14 +1581,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json({"error": "课件质检发现阻断问题", "quality": quality}, 400)
                     return
                 output = create_ppt(plan)
-                model_plan = plan["modelPlan"]
-                model = biomed_models.generate_model(model_plan["modelKey"], model_plan.get("parts"), model_plan.get("renderMode", "exploded"))
-                artifacts = {"pptx": "generated", "glb": "generated" if model["status"] == "generated" else "fallback" if model.get("glbUrl") else "unavailable", "blend": "generated" if model.get("blendUrl") else "unavailable", "preview": "generated" if model.get("previewUrl") else "unavailable"}
-                if model["status"] != "generated":
-                    quality["warnings"].append({"code": "model-fallback", "message": model["message"]})
-                    quality["score"] = max(0, quality["score"] - 5)
-                quality["artifacts"] = artifacts
-                self.send_json({"lessonPlan": plan, "pptx": {"fileName": output.name, "downloadUrl": f"/api/ppt/download/{output.name}"}, "model": model, "quality": quality, "artifacts": artifacts})
+                animation = add_verified_ppt_animations(output, plan)
+                raise RuntimeError("整套生成接口不再自动调用内置模型；请在当前课程中上传图片并使用 混元 3D 建模")
             elif request_path == "/api/ppt/preview":
                 plan = payload.get("lessonPlan") or build_lesson(payload)
                 slides = expanded_slides(plan)
@@ -1028,16 +1629,22 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json({"error": "课件质检发现阻断问题", "quality": quality}, 400)
                     return
                 output = create_ppt(plan)
-                self.send_json({"fileName": output.name, "downloadUrl": f"/api/ppt/download/{output.name}", "quality": quality})
+                animation = add_verified_ppt_animations(output, plan)
+                self.send_json({"fileName": output.name, "downloadUrl": f"/api/ppt/download/{output.name}", "quality": quality, "animation": animation})
             else:
                 self.send_json({"error": "Not found"}, 404)
         except (ValueError, KeyError, zipfile.BadZipFile) as exc:
+            print(f"[teacher-studio] request rejected: {exc}", flush=True)
             self.send_json({"error": str(exc)}, 400)
         except Exception as exc:
+            print(f"[teacher-studio] request failed: {exc}", flush=True)
             self.send_json({"error": str(exc)}, 500)
 
     def do_GET(self):
         parsed = urlparse(self.path)
+        if parsed.path == "/api/local-model/status":
+            self.send_json(ollama_adapter.status())
+            return
         if parsed.path == "/api/biomed/models":
             self.send_json({"models": biomed_models.catalog(), "blenderAvailable": biomed_models.find_blender() is not None})
             return
@@ -1051,26 +1658,39 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_bytes(path.read_bytes(), allowed[path.suffix.lower()])
                 return
         if parsed.path == "/api/3d/status":
-            sf3d_base, sf3d_key = sf3d_config()
+            hunyuan_base, hunyuan_key, hunyuan_model = hunyuan3d_config()
             segmentation_status = partfield_adapter.status()
-            if sf3d_key:
+            if hunyuan_key:
                 self.send_json({
                     **local_reconstruction.status(biomed_models.find_blender() is not None),
-                    "provider": "sf3d-api",
-                    "paidApi": False,
+                    "provider": "hunyuan3d",
+                    "paidApi": True,
                     "networkRequired": True,
-                    "apiBase": sf3d_base,
+                    "apiBase": hunyuan_base,
+                    "model": hunyuan_model,
                     "segmentation": segmentation_status,
-                    "singleImage": {"available": True, "engine": "sf3d-api", "quality": "sf3d-reference"},
-                    "multiview": {"available": True, "engine": "sf3d-api-front-priority", "quality": "sf3d-reference-front-priority", "fusionAvailable": False},
+                    "singleImage": {"available": True, "engine": "hunyuan3d", "quality": "hunyuan3d-high-precision"},
+                    "multiview": {
+                        "available": True,
+                        "engine": "hunyuan3d-four-view",
+                        "quality": "hunyuan3d-high-precision",
+                        "fusionAvailable": True,
+                        "scope": "base64-upload",
+                        "genericFusionAvailable": True,
+                        "inputViewCount": 4,
+                        "providerViewCapacity": 8,
+                        "reason": "混元 3D 3.1 支持多视角输入，本页面固定提交正面、左侧、右侧和背面四张",
+                    },
                     "multiviewViews": list(MULTIVIEW_KEYS),
                 })
                 return
             self.send_json({
                 **local_reconstruction.status(biomed_models.find_blender() is not None),
+                "provider": "hunyuan3d",
+                "configured": False,
                 "segmentation": segmentation_status,
-                "singleImage": {"available": triposr_local.available(), "engine": "triposr-local", "quality": "neural-reconstruction"},
-                "multiview": {"available": True, "engine": "triposr-local-front-priority", "quality": "neural-reconstruction-front-priority", "fusionAvailable": False},
+                "singleImage": {"available": False, "engine": "hunyuan3d", "quality": "unavailable"},
+                "multiview": {"available": False, "engine": "hunyuan3d-four-view", "quality": "unavailable", "fusionAvailable": False, "inputViewCount": 4, "providerViewCapacity": 8},
                 "multiviewViews": list(MULTIVIEW_KEYS),
             })
             return
@@ -1080,6 +1700,18 @@ class Handler(BaseHTTPRequestHandler):
             file_path = file_path.resolve()
             if OUTPUT_DIR.resolve() in file_path.parents and file_path.suffix == ".pptx" and file_path.is_file():
                 data = file_path.read_bytes(); self.send_response(200); self._headers("application/vnd.openxmlformats-officedocument.presentationml.presentation", len(data)); self.send_header("Content-Disposition", f'attachment; filename="{file_path.name}"'); self.end_headers(); self.wfile.write(data); return
+        courseware_prefix = "/api/courseware/download/"
+        if parsed.path.startswith(courseware_prefix):
+            file_path = (OUTPUT_DIR / unquote(parsed.path[len(courseware_prefix):])).resolve()
+            allowed = {
+                ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                ".zip": "application/zip",
+            }
+            content_type = allowed.get(file_path.suffix.lower())
+            if content_type and OUTPUT_DIR.resolve() in file_path.parents and file_path.is_file():
+                data = file_path.read_bytes(); self.send_response(200); self._headers(content_type, len(data)); self.send_header("Content-Disposition", f'attachment; filename="{file_path.name}"'); self.end_headers(); self.wfile.write(data); return
+            self.send_json({"error": "互动课件文件不存在"}, 404)
+            return
         asset_prefix = "/api/assets/"
         if parsed.path.startswith(asset_prefix):
             relative = unquote(parsed.path[len(asset_prefix):]).replace("/", os.sep)

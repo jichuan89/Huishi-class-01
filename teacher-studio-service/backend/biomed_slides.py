@@ -147,6 +147,10 @@ def quality(plan):
     for kind in ("知识结构","观察","案例","练习","总结"):
         if not any(s.get("type")==kind for s in slides):
             warnings.append(dict(code="missing-"+kind,message="缺少"+kind+"页面"))
+    if not any(s.get("experienceMode") for s in slides):
+        warnings.append(dict(code="missing-interaction",message="缺少可操作的模型观察或课堂挑战"))
+    if not any(s.get("feedback") for s in slides):
+        warnings.append(dict(code="missing-feedback",message="缺少操作后的即时反馈规则"))
     model = plan.get("modelPlan",{})
     if not model.get("observationTasks"):
         blocking.append(dict(code="no-observation",message="缺少结构观察任务"))

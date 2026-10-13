@@ -1,8 +1,5 @@
-.undergraduate-fields { border-left: 3px solid #18806d; padding-left: 16px; }
-.bio-toggles, .artifact-status, .artifact-downloads, .bio-visibility { display: flex; flex-wrap: wrap; gap: 10px; }
-.bio-toggles label { display: flex; align-items: center; gap: 6px; font-size: 13px; }
-.form-panel .bio-toggles input[type="checkbox"], .bio-parts input[type="checkbox"] { width: 16px; height: 16px; min-width: 16px; margin: 0; padding: 0; accent-color: #18806d; }
-.bio-toggles label { white-space: nowrap; }
+.artifact-status, .artifact-downloads, .bio-visibility { display: flex; flex-wrap: wrap; gap: 10px; }
+.bio-parts input[type="checkbox"] { width: 16px; height: 16px; min-width: 16px; margin: 0; padding: 0; accent-color: #18806d; }
 .artifact-status { padding: 12px 20px; border-block: 1px solid #e0e7e5; background: #f5f9f8; font-size: 12px; }
 .artifact-status span { color: #53616b; }
 .artifact-status [data-status="generated"] { color: #13755e; }

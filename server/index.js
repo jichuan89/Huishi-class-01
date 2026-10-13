@@ -5,10 +5,10 @@ import dotenv from 'dotenv';
 import express from 'express';
 import jwt from 'jsonwebtoken';
 import mysql from 'mysql2/promise';
-import { randomUUID } from 'node:crypto';
-import { mkdir, unlink, writeFile } from 'node:fs/promises';
+import { randomUUID, createHash } from 'node:crypto';
+import { mkdir, unlink, writeFile, readFile, rename } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
@@ -36,7 +36,7 @@ import {
 import { attachVolcTtsWebSocketServer, createVolcTtsService } from './volcTts.js';
 
 dotenv.config();
-dotenv.config({ path: '.env.local', override: false });
+dotenv.config({ path: '.env.local', override: true });
 dotenv.config({ path: 'env.local', override: true });
 
 const app = express();
@@ -121,7 +121,8 @@ process.once('exit', stopTeacherStudioService);
 const MAX_FEEDBACK_UPLOAD_SIZE = 16 * 1024 * 1024;
 const MAX_RESOURCE_FILE_SIZE = 200 * 1024 * 1024;
 const MAX_RESOURCE_UPLOAD_SIZE = 260 * 1024 * 1024;
-const MAX_USER_MODEL_UPLOAD_SIZE = 75 * 1024 * 1024;
+const MAX_USER_IMAGE_UPLOAD_SIZE = 75 * 1024 * 1024;
+const MAX_USER_MODEL_UPLOAD_SIZE = 260 * 1024 * 1024;
 const RESOURCE_MODEL_EXTENSIONS = new Set(['.glb', '.gltf', '.fbx']);
 const RESOURCE_ASSET_EXTENSIONS = new Set([
   ...RESOURCE_MODEL_EXTENSIONS,
@@ -183,7 +184,14 @@ if (!/^[a-zA-Z0-9_$-]+$/.test(dbConfig.database)) {
 let pool;
 
 app.use(cors({
-  origin: CLIENT_ORIGIN,
+  origin: (origin, callback) => {
+    // Vite may be opened through localhost or 127.0.0.1 during local development.
+    // Keep production locked to CLIENT_ORIGIN while allowing both local aliases.
+    if (!origin || origin === CLIENT_ORIGIN || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error('Origin not allowed by API CORS policy'));
+  },
   credentials: true,
 }));
 app.use(express.json({ limit: '12mb' }));
@@ -654,7 +662,7 @@ async function parseUserModelUpload(req, requiredFields) {
   const contentType = String(req.headers['content-type'] || '').toLowerCase();
   if (!contentType.startsWith('multipart/form-data')) throw httpError(415, '请使用图片表单上传');
   const length = Number(req.headers['content-length'] || 0);
-  if (length > MAX_USER_MODEL_UPLOAD_SIZE) throw httpError(413, '图片总大小不能超过 75MB');
+  if (length > MAX_USER_IMAGE_UPLOAD_SIZE) throw httpError(413, '图片总大小不能超过 75MB');
   let formData;
   try {
     const request = new Request('http://localhost/user-model-upload', { method: 'POST', headers: { 'content-type': String(req.headers['content-type']) }, body: Readable.toWeb(req), duplex: 'half' });
@@ -668,7 +676,55 @@ async function parseUserModelUpload(req, requiredFields) {
     if (!value.size || value.size > 12 * 1024 * 1024) throw httpError(413, `${field}图片不能超过 12MB`);
     files[field] = value;
   }
-  return files;
+  const separationMode = String(formData.get('separationMode') || 'geometric');
+  const organType = String(formData.get('organType') || '');
+  const anatomyProfile = String(formData.get('anatomyProfile') || '');
+  if (!['geometric', 'anatomical'].includes(separationMode)) throw httpError(400, '拆解方式无效');
+  if (separationMode === 'anatomical' && (organType !== 'heart' || !['heart-v1', 'heart-v2'].includes(anatomyProfile))) {
+    throw httpError(400, '医学语义拆解仅支持 heart / heart-v2（兼容 heart-v1）');
+  }
+  return { files, options: { separationMode, organType, anatomyProfile } };
+}
+
+async function parseImportedModelUpload(req) {
+  const contentType = String(req.headers['content-type'] || '').toLowerCase();
+  if (!contentType.startsWith('multipart/form-data')) throw httpError(415, '请使用模型文件表单上传');
+  const length = Number(req.headers['content-length'] || 0);
+  if (length > MAX_USER_MODEL_UPLOAD_SIZE) throw httpError(413, '模型及附件总大小不能超过 260MB');
+  let formData;
+  try {
+    const request = new Request('http://localhost/import-model-upload', {
+      method: 'POST',
+      headers: { 'content-type': String(req.headers['content-type']) },
+      body: Readable.toWeb(req),
+      duplex: 'half',
+    });
+    formData = await request.formData();
+  } catch {
+    throw httpError(400, '模型上传表单无法解析');
+  }
+  const files = formData.getAll('files').filter((value) => typeof value !== 'string' && typeof value?.arrayBuffer === 'function');
+  if (files.length === 0) throw httpError(400, '请选择 GLB、GLTF 或 FBX 模型文件');
+  if (files.length > 64) throw httpError(400, '一次最多上传 64 个模型及附件文件');
+  const normalized = files.map((file) => {
+    const name = normalizeUploadFileName(file.name);
+    const extension = path.extname(name).toLowerCase();
+    if (!RESOURCE_ASSET_EXTENSIONS.has(extension)) throw httpError(400, `不支持的模型附件格式：${name}`);
+    if (!file.size) throw httpError(400, `文件内容为空：${name}`);
+    return { file, name, extension };
+  });
+  const duplicates = new Set();
+  normalized.forEach(({ name }) => {
+    const key = name.toLowerCase();
+    if (duplicates.has(key)) throw httpError(400, `存在同名模型附件：${name}`);
+    duplicates.add(key);
+  });
+  const primaryName = normalizeUploadFileName(formData.get('primaryFileName'));
+  const primary = normalized.find(({ name }) => name.toLowerCase() === primaryName.toLowerCase());
+  if (!primary || !RESOURCE_MODEL_EXTENSIONS.has(primary.extension)) throw httpError(400, '请选择有效的 GLB、GLTF 或 FBX 主模型文件');
+  const totalSize = normalized.reduce((total, item) => total + Number(item.file.size || 0), 0);
+  if (totalSize > MAX_USER_MODEL_UPLOAD_SIZE) throw httpError(413, '模型及附件总大小不能超过 260MB');
+  return { primary, files: normalized, totalSize };
 }
 
 async function initializeUserModelStorage() {
@@ -709,7 +765,32 @@ async function updateUserModelJob(id, userId, patch) {
 
 function userModelUrl(id, type) { return `/api/models/${id}/files/${type}`; }
 
-async function runUserModelJob({ id, userId, mode, files }) {
+async function storeImportedUserModel(userId, upload) {
+  const jobId = randomUUID();
+  const modelId = randomUUID();
+  const runDir = path.join(USER_MODEL_STORAGE_DIRECTORY, String(userId), jobId);
+  await mkdir(runDir, { recursive: true });
+  const storedFiles = {};
+  const assetFiles = {};
+  for (const [index, item] of upload.files.entries()) {
+    const isPrimary = item === upload.primary;
+    const fileName = isPrimary ? `model${item.extension}` : `asset-${index}-${item.name}`;
+    await writeFile(path.join(runDir, fileName), Buffer.from(await item.file.arrayBuffer()));
+    if (isPrimary) storedFiles.model = fileName;
+    else assetFiles[item.name] = `asset-${index}`;
+    if (!isPrimary) storedFiles[`asset-${index}`] = fileName;
+  }
+  const manifest = {
+    status: 'generated', editable: true, source: 'imported', modelKind: `imported-${upload.primary.extension.slice(1)}`, modelType: upload.primary.extension.slice(1),
+    modelUrl: storedFiles.model, glbUrl: upload.primary.extension === '.glb' ? storedFiles.model : '', appearanceUrl: '', blendUrl: '', previewUrl: '', files: storedFiles,
+    assetFiles, parts: [], anatomyDisplayAvailable: false, message: '模型已导入，保留原始模型外观',
+  };
+  await pool.execute('INSERT INTO user_model_jobs (id, user_id, mode, status, model_id) VALUES (:id, :userId, "single", "completed", :modelId)', { id: jobId, userId, modelId });
+  await pool.execute('INSERT INTO user_models (id, user_id, job_id, name, mode, status, manifest) VALUES (:id, :userId, :jobId, :name, "single", "generated", :manifest)', { id: modelId, userId, jobId, name: upload.primary.name, manifest: JSON.stringify(manifest) });
+  return { id: modelId, jobId, name: upload.primary.name, manifest };
+}
+
+async function runUserModelJob({ id, userId, mode, files, options = {} }) {
   const runDir = path.join(USER_MODEL_STORAGE_DIRECTORY, String(userId), id);
   await mkdir(runDir, { recursive: true });
   try {
@@ -723,20 +804,31 @@ async function runUserModelJob({ id, userId, mode, files }) {
       sourceFiles[field] = { name: sourceName, type: file.type || 'image/jpeg' };
       form.append(field, new Blob([bytes], { type: file.type }), file.name);
     }
+    for (const field of ['separationMode', 'organType', 'anatomyProfile']) {
+      if (options[field]) form.append(field, options[field]);
+    }
     const targetPath = mode === 'single' ? '/api/3d/generate-image' : '/api/3d/generate-multiview-model';
     await updateUserModelJob(id, userId, { status: 'processing' });
     const upstream = await fetch(`${TEACHER_STUDIO_SERVICE_URL}${targetPath}`, { method: 'POST', body: form });
     const payload = await upstream.json().catch(() => ({}));
     if (!upstream.ok || !payload.glbUrl) throw new Error(payload.error || payload.message || '图像重建失败');
     const storedFiles = {};
-    for (const [type, field, fileName] of [['glb', 'glbUrl', 'model.glb'], ['blend', 'blendUrl', 'model.blend'], ['preview', 'previewUrl', 'preview.png']]) {
+    for (const [type, field, fileName] of [['glb', 'glbUrl', 'model.glb'], ['appearance', 'appearanceUrl', 'appearance.glb'], ['blend', 'blendUrl', 'model.blend'], ['preview', 'previewUrl', 'preview.png']]) {
       if (!payload[field]) continue;
       const artifact = await fetch(`${TEACHER_STUDIO_SERVICE_URL}${payload[field]}`);
       if (!artifact.ok) throw new Error(`${type} 文件保存失败`);
       await writeFile(path.join(runDir, fileName), Buffer.from(await artifact.arrayBuffer()));
       storedFiles[type] = fileName;
     }
-    const manifest = { ...payload, glbUrl: storedFiles.glb || '', blendUrl: storedFiles.blend || '', previewUrl: storedFiles.preview || '', files: storedFiles, sourceFiles, jobId: id, mode, workflow: payload.workflow || ['blender-director', 'blender-modeler', 'asset-optimization', 'export-pipeline', 'qa-review'] };
+    for (const view of ['front', 'left', 'right', 'back']) {
+      if (!payload.viewImageUrls?.[view]) continue;
+      const artifact = await fetch(`${TEACHER_STUDIO_SERVICE_URL}${payload.viewImageUrls[view]}`);
+      if (!artifact.ok) continue;
+      const fileName = `view-${view}.png`;
+      await writeFile(path.join(runDir, fileName), Buffer.from(await artifact.arrayBuffer()));
+      storedFiles[`view-${view}`] = fileName;
+    }
+    const manifest = { ...payload, glbUrl: storedFiles.glb || '', appearanceUrl: storedFiles.appearance || '', blendUrl: storedFiles.blend || '', previewUrl: storedFiles.preview || '', files: storedFiles, sourceFiles, jobId: id, mode, generationOptions: options, workflow: payload.workflow || ['blender-director', 'blender-modeler', 'asset-optimization', 'export-pipeline', 'qa-review'] };
     const modelId = randomUUID();
     await pool.execute('INSERT INTO user_models (id, user_id, job_id, name, mode, status, manifest) VALUES (:id, :userId, :jobId, :name, :mode, :status, :manifest)', { id: modelId, userId, jobId: id, name: mode === 'single' ? '单图生成模型' : '四视图生成模型', mode, status: manifest.status || 'generated', manifest: JSON.stringify(manifest) });
     await updateUserModelJob(id, userId, { status: 'completed', modelId });
@@ -1002,6 +1094,21 @@ async function initializeDatabase() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `);
 
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS lesson_courseware (
+      lesson_id VARCHAR(64) NOT NULL,
+      user_id BIGINT UNSIGNED NOT NULL,
+      manifest JSON NOT NULL,
+      revision INT UNSIGNED NOT NULL DEFAULT 1,
+      status VARCHAR(24) NOT NULL DEFAULT 'draft',
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (lesson_id, user_id),
+      KEY lesson_courseware_user_updated_index (user_id, updated_at),
+      CONSTRAINT lesson_courseware_user_fk FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+
   await initializeUserModelStorage();
 
   await initializeResourceLibrary();
@@ -1038,13 +1145,60 @@ app.get('/api/health', (_req, res) => {
 
 function rewriteTeacherStudioUrls(value) {
   if (typeof value === 'string') {
-    return value.replace(/\/api\/(3d|ppt|assets)\//g, '/api/prep/$1/');
+    return value.replace(/\/api\/(3d|ppt|assets|courseware)\//g, '/api/prep/$1/');
   }
   if (Array.isArray(value)) return value.map(rewriteTeacherStudioUrls);
   if (value && typeof value === 'object') {
     return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, rewriteTeacherStudioUrls(item)]));
   }
   return value;
+}
+
+async function prepareOwnedModelForExport(manifest, userId) {
+  const model = { ...(manifest.model || {}) };
+  delete model.exportModelUrl;
+  const match = /^\/api\/models\/([^/]+)\/files\/(model|glb|appearance)(?:\?|$)/.exec(model.modelUrl || '');
+  if (match) {
+    const [rows] = await pool.execute('SELECT * FROM user_models WHERE id = :id AND user_id = :userId LIMIT 1', { id: match[1], userId });
+    if (!rows[0]) throw Object.assign(new Error('当前模型不存在或无权访问'), { status: 404 });
+    const stored = parseModelManifest(rows[0].manifest);
+    const type = match[2];
+    const name = stored.files?.[type] || stored.files?.model || stored[type === 'glb' ? 'glbUrl' : type === 'appearance' ? 'appearanceUrl' : 'modelUrl'];
+    if (!name || path.basename(name) !== name) throw Object.assign(new Error('当前模型文件不可用，请重新连接模型后重试'), { status: 404 });
+    const bytes = await readFile(path.join(USER_MODEL_STORAGE_DIRECTORY, String(userId), rows[0].job_id, name)).catch(() => {
+      throw Object.assign(new Error('无法读取当前模型，自动截图未开始。请重新连接模型后重试'), { status: 404 });
+    });
+    const digest = createHash('sha256').update(bytes).digest('hex');
+    const directory = path.join(TEACHER_STUDIO_ROOT, 'generated', 'courseware-models');
+    await mkdir(directory, { recursive: true });
+    const extension = path.extname(name).toLowerCase() || '.glb';
+    const staging = path.join(directory, `${digest}-${randomUUID()}.pending`);
+    try {
+      await writeFile(staging, bytes);
+      await rename(staging, path.join(directory, `${digest}${extension}`));
+    } finally {
+      await unlink(staging).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+    }
+    model.exportModelUrl = `/api/3d/download/courseware-models/${digest}${extension}`;
+  }
+  return { ...manifest, model };
+}
+
+function requestLongRunningModel(target, init) {
+  // Node fetch defaults to a five-minute header timeout. Provider generation
+  // and model download can exceed that while the local worker is still running.
+  return new Promise((resolve, reject) => {
+    const transport = httpRequest(target, { method: init.method, headers: init.headers }, (response) => {
+      resolve(new Response(Readable.toWeb(response), {
+        status: response.statusCode,
+        headers: Object.fromEntries(Object.entries(response.headers).filter(([, value]) => value !== undefined)),
+      }));
+    });
+    transport.setTimeout(20 * 60 * 1000, () => transport.destroy(new Error('模型生成等待超时')));
+    transport.on('error', reject);
+    if (init.body?.pipe) init.body.pipe(transport);
+    else transport.end(init.body);
+  });
 }
 
 async function proxyTeacherStudioRequest(req, res) {
@@ -1058,7 +1212,11 @@ async function proxyTeacherStudioRequest(req, res) {
   const init = { method: req.method, headers };
   if (!['GET', 'HEAD'].includes(req.method)) {
     if (String(req.headers['content-type'] || '').includes('application/json')) {
-      init.body = JSON.stringify(req.body || {});
+      const payload = req.body || {};
+      if (targetPath.startsWith('/api/courseware/') && payload.manifest) {
+        payload.manifest = await prepareOwnedModelForExport(payload.manifest, req.user.id);
+      }
+      init.body = JSON.stringify(payload);
       delete headers['content-length'];
     } else {
       init.body = req;
@@ -1068,9 +1226,11 @@ async function proxyTeacherStudioRequest(req, res) {
 
   let upstream;
   try {
-    upstream = await fetch(target, init);
+    upstream = targetPath.startsWith('/api/3d/generate')
+      ? await requestLongRunningModel(target, init)
+      : await fetch(target, init);
   } catch (error) {
-    return res.status(502).json({ message: `备课生成服务不可用：${error.message}` });
+    return res.status(502).json({ error: `备课生成服务不可用：${error.message}` });
   }
 
   const contentType = upstream.headers.get('content-type') || 'application/octet-stream';
@@ -1090,21 +1250,31 @@ app.use('/api/prep', requireAuth, proxyTeacherStudioRequest);
 
 app.post('/api/models/jobs/single-image', requireAuth, async (req, res, next) => {
   try {
-    const files = await parseUserModelUpload(req, ['image']);
+    const { files, options } = await parseUserModelUpload(req, ['image']);
     const id = randomUUID();
     await pool.execute('INSERT INTO user_model_jobs (id, user_id, mode, status) VALUES (:id, :userId, "single", "queued")', { id, userId: req.user.id });
-    void runUserModelJob({ id, userId: req.user.id, mode: 'single', files });
+    void runUserModelJob({ id, userId: req.user.id, mode: 'single', files, options });
     return res.status(202).json({ job: { id, status: 'queued', mode: 'single' } });
   } catch (error) { return next(error); }
 });
 
 app.post('/api/models/jobs/multiview', requireAuth, async (req, res, next) => {
   try {
-    const files = await parseUserModelUpload(req, ['front', 'left', 'right', 'back']);
+    const { files, options } = await parseUserModelUpload(req, ['front', 'left', 'right', 'back']);
     const id = randomUUID();
     await pool.execute('INSERT INTO user_model_jobs (id, user_id, mode, status) VALUES (:id, :userId, "multiview", "queued")', { id, userId: req.user.id });
-    void runUserModelJob({ id, userId: req.user.id, mode: 'multiview', files });
+    void runUserModelJob({ id, userId: req.user.id, mode: 'multiview', files, options });
     return res.status(202).json({ job: { id, status: 'queued', mode: 'multiview' } });
+  } catch (error) { return next(error); }
+});
+
+app.post('/api/models/import', requireAuth, async (req, res, next) => {
+  try {
+    const upload = await parseImportedModelUpload(req);
+    const stored = await storeImportedUserModel(req.user.id, upload);
+    const [rows] = await pool.execute('SELECT * FROM user_models WHERE id = :id AND user_id = :userId LIMIT 1', { id: stored.id, userId: req.user.id });
+    if (!rows[0]) throw httpError(500, '模型已保存但无法读取模型记录');
+    return res.status(201).json({ model: privateModelPayload(rows[0]) });
   } catch (error) { return next(error); }
 });
 
@@ -1116,24 +1286,46 @@ function parseModelManifest(value) {
 
 function privateModelPayload(row) {
   const manifest = parseModelManifest(row.manifest);
+  const assetUrls = Object.fromEntries(Object.entries(manifest.assetFiles || {}).map(([name, key]) => [name, userModelUrl(row.id, key)]));
+  const primaryType = manifest.modelType || 'glb';
+  const primaryUrl = manifest.modelUrl
+    ? userModelUrl(row.id, 'model')
+    : (manifest.glbUrl ? userModelUrl(row.id, 'glb') : (manifest.appearanceUrl ? userModelUrl(row.id, 'appearance') : ''));
   return {
     id: row.id,
     name: row.name,
     mode: row.mode,
     status: row.status,
+    source: manifest.source || 'generated',
+    modelUrl: primaryUrl,
+    modelType: primaryType,
     editable: Boolean(manifest.editable),
     message: manifest.message || '',
     parts: Array.isArray(manifest.parts) ? manifest.parts : [],
+    modelKind: manifest.modelKind || 'geometric-parts',
+    organType: manifest.organType || '',
+    anatomyProfile: manifest.anatomyProfile || '',
+    anatomyDisplayAvailable: manifest.anatomyDisplayAvailable !== false,
+    layers: Array.isArray(manifest.layers) ? manifest.layers : [],
+    registration: manifest.registration || null,
+    references: Array.isArray(manifest.references) ? manifest.references : [],
+    quality: manifest.quality || null,
     segmentation: manifest.segmentation || null,
     separation: manifest.separation || null,
     workflow: manifest.workflow || [],
-    engine: manifest.engine || 'offline-visual-hull',
+    engine: manifest.engine || 'unknown',
     qualityTier: manifest.qualityTier || 'basic',
-    paidApi: false,
+    paidApi: manifest.paidApi === true,
     warnings: Array.isArray(manifest.warnings) ? manifest.warnings : [],
     glbUrl: manifest.glbUrl ? userModelUrl(row.id, 'glb') : '',
+    appearanceUrl: manifest.appearanceUrl ? userModelUrl(row.id, 'appearance') : '',
     blendUrl: manifest.blendUrl ? userModelUrl(row.id, 'blend') : '',
     previewUrl: manifest.previewUrl ? userModelUrl(row.id, 'preview') : '',
+    assetUrls,
+    viewImageUrls: Object.fromEntries(['front', 'left', 'right', 'back'].filter((view) => manifest.files?.[`view-${view}`]).map((view) => [view, userModelUrl(row.id, `view-${view}`)])),
+    viewModelFingerprint: manifest.viewModelFingerprint || '',
+    viewRenderVersion: manifest.viewRenderVersion || '',
+    viewImageSource: manifest.viewImageSource || '',
     createdAt: row.created_at,
   };
 }
@@ -1160,10 +1352,12 @@ app.get('/api/models/:id/files/:type', requireAuth, async (req, res) => {
   const [rows] = await pool.execute('SELECT * FROM user_models WHERE id = :id AND user_id = :userId LIMIT 1', { id: req.params.id, userId: req.user.id });
   if (!rows[0]) return res.status(404).json({ message: '模型文件不存在' });
   const manifest = parseModelManifest(rows[0].manifest);
-  const fileName = manifest.files?.[req.params.type] || manifest[{ glb: 'glbUrl', blend: 'blendUrl', preview: 'previewUrl' }[req.params.type]];
+  const fileName = manifest.files?.[req.params.type] || manifest[{ model: 'modelUrl', glb: 'glbUrl', appearance: 'appearanceUrl', blend: 'blendUrl', preview: 'previewUrl' }[req.params.type]];
   if (!fileName || path.basename(fileName) !== fileName) return res.status(404).json({ message: '模型文件不存在' });
   const localPath = path.join(USER_MODEL_STORAGE_DIRECTORY, String(req.user.id), rows[0].job_id, fileName);
-  const mimeType = { glb: 'model/gltf-binary', blend: 'application/octet-stream', preview: 'image/png' }[req.params.type];
+  const extension = path.extname(fileName).toLowerCase();
+  const mimeType = { glb: 'model/gltf-binary', appearance: 'model/gltf-binary', blend: 'application/octet-stream', preview: 'image/png', 'view-front': 'image/png', 'view-left': 'image/png', 'view-right': 'image/png', 'view-back': 'image/png' }[req.params.type]
+    || ({ '.glb': 'model/gltf-binary', '.gltf': 'model/gltf+json', '.bin': 'application/octet-stream', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.ktx': 'image/ktx', '.ktx2': 'image/ktx2', '.dds': 'application/octet-stream' }[extension]);
   if (!mimeType) return res.status(404).json({ message: '模型文件类型无效' });
   res.type(mimeType); res.set('Content-Disposition', `inline; filename="${path.basename(fileName)}"`);
   return res.sendFile(localPath, (error) => { if (error && !res.headersSent) res.status(error.statusCode || 404).json({ message: '模型文件不存在' }); });
@@ -1182,7 +1376,7 @@ app.post('/api/models/:id/reprocess', requireAuth, async (req, res) => {
   }
   const id = randomUUID();
   await pool.execute('INSERT INTO user_model_jobs (id, user_id, mode, status) VALUES (:id, :userId, :mode, "queued")', { id, userId: req.user.id, mode: rows[0].mode });
-  void runUserModelJob({ id, userId: req.user.id, mode: rows[0].mode, files });
+  void runUserModelJob({ id, userId: req.user.id, mode: rows[0].mode, files, options: manifest.generationOptions || {} });
   return res.status(202).json({ job: { id, status: 'queued', mode: rows[0].mode } });
 });
 
@@ -1216,6 +1410,95 @@ app.delete('/api/lesson-plans/:id', requireAuth, async (req, res) => {
   await pool.execute('DELETE FROM lesson_plans WHERE id = :id AND user_id = :userId', { id: req.params.id, userId: req.user.id });
   return res.status(204).end();
 });
+
+async function callTeacherStudioJson(pathname, payload) {
+  const response = await fetch(`${TEACHER_STUDIO_SERVICE_URL}${pathname}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const result = await response.json().catch(() => ({ error: '备课生成服务返回了无效响应' }));
+  if (!response.ok) {
+    const error = new Error(result.error || result.message || `备课生成服务请求失败 (${response.status})`);
+    error.statusCode = response.status;
+    error.payload = result;
+    throw error;
+  }
+  return rewriteTeacherStudioUrls(result);
+}
+
+app.get('/api/courseware/:lessonId', requireAuth, async (req, res) => {
+  const [rows] = await pool.execute(
+    'SELECT manifest, revision, status, created_at, updated_at FROM lesson_courseware WHERE lesson_id = :lessonId AND user_id = :userId LIMIT 1',
+    { lessonId: req.params.lessonId, userId: req.user.id },
+  );
+  if (!rows[0]) return res.status(404).json({ message: '互动课件不存在' });
+  return res.json({
+    manifest: parseModelManifest(rows[0].manifest),
+    revision: rows[0].revision,
+    status: rows[0].status,
+    createdAt: rows[0].created_at,
+    updatedAt: rows[0].updated_at,
+  });
+});
+
+app.put('/api/courseware/:lessonId', requireAuth, async (req, res) => {
+  const manifest = req.body?.manifest;
+  if (!manifest || typeof manifest !== 'object' || !Array.isArray(manifest.scenes)) {
+    return res.status(400).json({ message: '互动课件内容无效' });
+  }
+  const lessonId = String(req.params.lessonId).slice(0, 64);
+  if (String(manifest.lessonId || lessonId) !== lessonId) {
+    return res.status(400).json({ message: '课件与课程编号不一致' });
+  }
+  const revision = Math.max(1, Number(manifest.revision || req.body?.revision || 1));
+  const status = String(manifest.status || 'draft').slice(0, 24);
+  await pool.execute(
+    `INSERT INTO lesson_courseware (lesson_id,user_id,manifest,revision,status)
+     VALUES (:lessonId,:userId,:manifest,:revision,:status)
+     ON DUPLICATE KEY UPDATE manifest=VALUES(manifest),revision=VALUES(revision),status=VALUES(status)`,
+    { lessonId, userId: req.user.id, manifest: JSON.stringify({ ...manifest, lessonId }), revision, status },
+  );
+  return res.json({ lessonId, revision, status });
+});
+
+async function loadOwnedCourseware(req, res) {
+  const [rows] = await pool.execute(
+    'SELECT manifest FROM lesson_courseware WHERE lesson_id = :lessonId AND user_id = :userId LIMIT 1',
+    { lessonId: req.params.lessonId, userId: req.user.id },
+  );
+  if (!rows[0]) {
+    res.status(404).json({ message: '互动课件不存在' });
+    return null;
+  }
+  return parseModelManifest(rows[0].manifest);
+}
+
+app.post('/api/courseware/:lessonId/regenerate-scene', requireAuth, async (req, res, next) => {
+  try {
+    const manifest = await loadOwnedCourseware(req, res);
+    if (!manifest) return;
+    const result = await callTeacherStudioJson('/api/courseware/regenerate-scene', { manifest, sceneId: req.body?.sceneId });
+    await pool.execute(
+      'UPDATE lesson_courseware SET manifest=:manifest,revision=:revision,status=:status WHERE lesson_id=:lessonId AND user_id=:userId',
+      { manifest: JSON.stringify(result.manifest), revision: result.manifest.revision || 1, status: result.manifest.status || 'draft', lessonId: req.params.lessonId, userId: req.user.id },
+    );
+    return res.json(result);
+  } catch (error) { return next(error); }
+});
+
+for (const [route, studioPath] of [
+  ['export-zip', '/api/courseware/export-zip'],
+  ['export-pptx', '/api/courseware/export-pptx'],
+]) {
+  app.post(`/api/courseware/:lessonId/${route}`, requireAuth, async (req, res, next) => {
+    try {
+      const manifest = await loadOwnedCourseware(req, res);
+      if (!manifest) return;
+      return res.json(await callTeacherStudioJson(studioPath, { manifest: await prepareOwnedModelForExport(manifest, req.user.id) }));
+    } catch (error) { return next(error); }
+  });
+}
 
 registerLearningMemoryRoutes(app, {
   getPool: () => pool,

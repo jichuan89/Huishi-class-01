@@ -4,6 +4,7 @@ import re
 import uuid
 
 from biomed_models import model_plan
+from teaching_benchmarks import benchmark_profile
 
 
 TOPICS = {
@@ -95,8 +96,10 @@ def build_lesson(request):
     if key not in TOPICS:
         raise ValueError("请选择心脏、肺、肾脏或细胞模型")
     data = TOPICS[key]
-    duration = max(20, min(120, int(request.get("duration") or 45)))
+    requested_duration = int(request.get("duration") or 40)
+    duration = min((40, 80, 120), key=lambda value: abs(value - requested_duration))
     request.update(stage="本科", duration=duration, subject=request.get("subject") or "生物医学")
+    benchmark = benchmark_profile(request)
     outcomes = lines(request.get("learningOutcomes") or request.get("objectives"), data["outcomes"])
     prior = lines(request.get("prerequisites") or request.get("priorKnowledge"), data["prior"])
     assessment = lines(request.get("assessmentMethod") or request.get("assessment"), ["结构定位30%：准确标出关键部件", "机制解释40%：顺序、方向与依据完整", "应用判断30%：区分证据、推断和待验证问题"])
@@ -115,15 +118,56 @@ def build_lesson(request):
     homework = str(request.get("homework") or data["homework"])
     if request.get("includeResearch") == "包含":
         homework += " 阅读参考教材对应章节，提出一个可检验问题并列出证据需求。"
-    stages = ["生物医学问题导入", "先修知识检查", "结构观察与3D任务", "机制或过程讲解", "病例讨论" if case_enabled else "实际应用", "结构对比与辨析", "课堂练习与即时评价", "总结与课后任务"]
-    weights = [4, 4, 8, 9, 7, 4, 6, 3]
-    times = [round(duration * w / 45) for w in weights]
+    professional_outcomes = [
+        f"针对本科生物医学专业学生，在3D模型、结构示意和给定资料条件下，能够准确定位{data['title']}的关键结构，达到关键部件标注正确率不低于90%。",
+        f"针对本科生物医学专业学生，在血流/过程图和病例证据条件下，能够分析{data['question']}，达到能写出结构、机制和证据边界三部分依据。",
+    ]
+    general_outcomes = [
+        "在小组结构观察中，能够用规范术语向同伴说明一个结构与功能关系，并根据反馈修正表达。",
+        "在病例讨论中，能够区分直接证据、机制推断和仍需验证的信息，形成一条可追溯的判断链。",
+    ]
+    content_analysis = {
+        "事实性知识": data["structure"],
+        "概念性知识": data["map"] + data["compare"][:1],
+        "程序性知识": ["按观察顺序定位结构", "沿方向箭头追踪机制链", "依据给定证据完成病例判断"],
+        "元认知知识": ["用结构、方向和证据三项清单自检", "区分已知事实、合理推断与待验证问题"],
+        "范围筛选": ["优先学习：关键结构、结构功能关系和机制链", "略讲或课后延伸：超出本课模型范围的临床细节"],
+    }
+    intro_design = {
+        "hookType": "问题锚点",
+        "reason": "用反直觉的结构问题连接先修知识与本课机制，先制造认知缺口，再进入模型观察。",
+        "script": data["question"] + "。先不要查答案，请每个人写下判断和一条理由；下课前我们再用模型和证据检查它。",
+        "studentPrediction": "学生先依据已有的循环或结构知识作出判断，并暴露对结构名称、方向或分类标准的混淆。",
+        "duration": 5,
+    }
+    question_chain = [
+        {"level": "认知", "question": "在模型中指出本课需要观察的关键结构，并说出它们的连接关系。", "followUp": "如果只看外形，怎样用连接关系确认你的判断？", "studentGain": "能够定位关键部件并说出至少一条连接依据。"},
+        {"level": "内化", "question": "这些结构为什么要按这样的方向连接？请用一条机制箭头解释。", "followUp": "改变压力、分压或运输条件后，哪一步会先受到影响？", "studentGain": "能够把结构关系转化为方向明确的机制链。"},
+        {"level": "应用", "question": data["question"], "followUp": "你的结论依靠哪些直接证据？还缺什么数据才能继续判断？", "studentGain": "能够在给定情境下完成结构功能判断，并区分证据和推断。"},
+    ]
+    teacher_actions = [
+        {"stage": "导入", "actions": ["提问", "板书"], "detail": "用问题锚点引出旧知，板书保留学生初始判断，不立即公布答案。", "board": "问题锚点：初始判断 → 待验证证据"},
+        {"stage": "认知", "actions": ["讲解", "演示", "提问"], "detail": "先演示观察顺序，再用简短说明连接结构名称与功能，演示到哪一步就指到哪一步，并停顿核查。", "board": "提纲式：结构 → 连接 → 方向"},
+        {"stage": "内化", "actions": ["提问", "组织", "板书"], "detail": "组织2至4人小组完成结构和机制箭头任务，巡视追问依据，记录学生的关键词。", "board": "线索式：条件 → 机制 → 结果"},
+        {"stage": "应用", "actions": ["演示", "组织", "评价"], "detail": "先给病例证据和任务标准，再让小组判断；要求结论后面必须跟证据，最后按结构、机制、证据三项互评。", "board": "证据链：已知 → 推断 → 待验证"},
+    ]
+    activities = [
+        {"name": "结构观察与先修检查", "level": "认知", "type": "理论学习+3D观察", "duration": 8, "student": "按前视、侧视和隐藏部件顺序标注模型，写出一条连接关系。", "learn": "关键结构名称、空间关系和先修概念。", "result": "完成结构定位表，至少8个关键标签正确。", "evaluation": "教师抽查标注；结构名称与连接关系均正确。", "role": "示范观察顺序并及时纠正方向错误。"},
+        {"name": "机制链重建", "level": "内化", "type": "小组讨论+图解", "duration": 10, "student": "小组用箭头重建过程，解释每个转折点的结构依据。", "learn": "结构到功能、方向到机制的转换。", "result": "完成一条方向完整的机制链并口头说明。", "evaluation": "同伴按方向、结构、条件三项互评。", "role": "用追问推动学生从记名称转向解释原因。"},
+        {"name": "病例证据判断", "level": "应用", "type": "案例讨论", "duration": 12, "student": "根据病例材料提出判断，分开列出直接证据、推断和缺失数据。", "learn": "用结构功能关系解释实际情境，控制结论边界。", "result": "形成一条证据链，并能说明不能推出的结论。", "evaluation": "按证据充分性、机制合理性和边界意识评分。", "role": "提供支架，避免学生把教学情境当作个体诊断。"},
+        {"name": "即时评价与修订", "level": "应用", "type": "练习+同伴互评", "duration": 7, "student": "独立完成结构排序和判断题，再根据评分点修订最初答案。", "learn": "迁移机制、发现错误并自我校正。", "result": "完成出口条：一个机制结论和一个待验证问题。", "evaluation": "结构、机制、证据各占一项；未达标者用模型重做。", "role": "收集形成性评价证据并进行个别补救。"},
+    ]
+    ability_differentiation = {
+        "本科基础层": "提供部件清单、半成品机制图和关键术语，重点检查定位、方向和基本证据。",
+        "本科进阶层": "减少结构提示，增加条件变化和证据不足情境，要求学生提出验证方法或替代解释。",
+    }
+    stages = ["导入", "学生活动1：结构观察与先修检查", "学生活动2：机制链重建", "学生活动3：病例证据判断", "学生活动4：即时评价与修订", "总结本次课", "布置作业"]
+    weights = [5, 8, 10, 12, 7, 5, 3]
+    times = [round(duration * w / 40) for w in weights]
     times[-1] += duration - sum(times)
-    teachers = [data["question"], "检查：" + "；".join(prior), "按观察任务切换模型部件，并核对解剖方向", "用板书箭头串联：" + "；".join(data["mechanism"]), case, "；".join(data["compare"]), "逐题收集答案后再揭示依据；" + "；".join(assessment), "回扣学习成果；布置：" + homework]
-    students = ["独立判断并保留最初理由", "用一句话解释一个先修概念", "小组标注结构、隐藏指定部件并记录连接关系", "补全方向与条件，口述机制链", "列出证据、解释和仍缺的数据", "找出变化的结构及其功能后果", "独立作答、同伴按评分点互评", "提交出口条：一个机制与一个待解决问题"]
-    if request.get("includeExperiment") == "包含":
-        students[2] += "；用观察记录表区分直接观察与机制推断"
-    checks = ["是否指出分类依据", "两项先修概念是否正确", "部件名称与连接是否准确", "箭头方向及条件是否完整", "是否区分证据与推断", "是否控制其他变量", "记录各学习成果达成情况", "出口条是否回应核心问题"]
+    teachers = [intro_design["script"], "示范观察顺序，检查：" + "；".join(prior), "组织小组重建机制链并追问依据", "提供病例证据，要求结论与依据分栏", "逐题收集答案并按评分点反馈", "回扣专业能力目标和通用能力变化", "说明分层作业：" + homework]
+    students = ["独立判断并保留最初理由", activities[0]["student"], activities[1]["student"], activities[2]["student"], activities[3]["student"], "用一句话回答核心问题并指出自己的修订", "提交结构图、机制解释与引用来源"]
+    checks = ["记录初始判断和一条依据", activities[0]["evaluation"], activities[1]["evaluation"], activities[2]["evaluation"], activities[3]["evaluation"], "专业能力目标和通用能力目标各有一条证据", "作业包含结构、机制和来源"]
     phases = [{"id": f"phase-{i+1}", "time": times[i], "name": name, "teacher": teachers[i], "student": students[i], "check": checks[i]} for i, name in enumerate(stages)]
     slides = []
     def page(kind, title, items, layout, phase, purpose):
@@ -133,6 +177,7 @@ def build_lesson(request):
     page("问题", "核心生物医学问题", [request.get("coreQuestion") or data["question"], "先判断，再写出一条依据"], "question-split", 2, "保留初始答案，课末重新解释")
     page("知识结构", "建立知识结构", data["map"], "layer-map", 3, "从结构走向功能")
     page("观察", "3D结构观察", ["部件：" + "、".join(p["name"] for p in model["partDetails"]), model["observationTasks"][0], model["observationTasks"][-1]], "observation-stage", 3, "前视定位、侧视确认、隐藏部件核对；见模型面板")
+    slides[-1].update(experienceMode="control-lab", feedback="选中部件后立即显示名称、连接关系和观察提示")
     structure = data["structure"][:]
     if evidence:
         structure = ["用户资料摘录：" + evidence[0][:120], *data["structure"][:2]]
@@ -143,17 +188,22 @@ def build_lesson(request):
     page("案例", "病例证据链" if case_enabled else "实际应用任务", [case, *data["evidence"][:2]] if case_enabled else [case, *data["structure"][:2]], "evidence-list", 5, "区分已知证据、解释与结论边界")
     page("辨析", "正常与异常对比", data["compare"], "compare-duo", 6, "先指出变化，再解释功能后果")
     page("练习", "独立判断与即时评价", data["quiz"], "task-timer", 7, "三分钟作答，再按结构、机制、证据互评")
+    slides[-1].update(experienceMode="game-challenge", feedback="提交后逐题显示判断依据，并允许返回模型修订答案")
     page("揭示", "答案与机制解释", data["answers"], "answer-rail", 7, "逐项核对，不只记录对错")
-    page("总结", "从结构回到解释", [data["map"][0], data["mechanism"][-1], "出口条：回答核心问题并说明适用条件"], "loop-summary", 8, "回看最初判断并修订理由")
-    page("参考资料", "参考资料与来源", [f"[{i+1}] {r['title']} / {r['author']} / {r['year']}" for i,r in enumerate(references)], "source-quote", 8, "用户资料优先；内置示意需结合教材核对")
+    page("总结", "从结构回到解释", [data["map"][0], data["mechanism"][-1], "出口条：回答核心问题并说明适用条件"], "loop-summary", 7, "回看最初判断并修订理由")
+    page("参考资料", "参考资料与来源", [f"[{i+1}] {r['title']} / {r['author']} / {r['year']}" for i,r in enumerate(references)], "source-quote", 7, "用户资料优先；内置示意需结合教材核对")
     slides[-1]["sourceIds"] = list(range(len(references)))
-    page("作业", "课后学习任务", [homework, "提交：结构图、机制解释与引用来源", "评价：结构准确、方向完整、证据可追溯"], "take-home", 8, "用学习成果检验迁移")
+    page("作业", "课后学习任务", [homework, "提交：结构图、机制解释与引用来源", "评价：结构准确、方向完整、证据可追溯"], "take-home", 7, "用学习成果检验迁移")
     return {"id": uuid.uuid4().hex, "createdAt": datetime.now().isoformat(timespec="seconds"), "request": request, "title": topic,
             "overview": f"本科生物医学，{duration}分钟。结构观察、机制解释与实际应用。" + ("用户资料优先，内置模板补充。" if material else "使用内置基础医学教学模板。"),
-            "courseProfile": {"stage": "本科", "field": request.get("field") or "生物医学", "courseName": request.get("courseName") or "基础生物医学", "courseType": request.get("courseType") or "专业核心课", "semester": request.get("semester") or "大一上", "credits": request.get("credits") or "2", "courseHours": request.get("courseHours") or "32"},
-            "learningOutcomes": outcomes, "prerequisites": prior, "knowledgeMap": data["map"], "casePrompt": case, "assessmentPlan": assessment, "references": references, "modelPlan": model,
+            "courseProfile": {"stage": "本科", "field": request.get("field") or "生物医学", "courseName": request.get("courseName") or "基础生物医学", "courseType": request.get("courseType") or "专业核心课", "semester": request.get("semester") or "第一学期", "credits": request.get("credits") or "2", "courseHours": request.get("courseHours") or "32"},
+            "learningOutcomes": outcomes, "professionalOutcomes": professional_outcomes, "generalOutcomes": general_outcomes,
+            "prerequisites": prior, "knowledgeMap": data["map"], "contentAnalysis": content_analysis, "introDesign": intro_design,
+            "questionChain": question_chain, "teacherActions": teacher_actions, "activities": activities,
+            "casePrompt": case, "assessmentPlan": assessment, "references": references, "modelPlan": model,
             "objectives": outcomes, "situation": request.get("learningSituation") or "已修基础生物学；需从部件辨认过渡到机制解释和证据判断。",
             "keyPoints": lines(request.get("keyPoints"), data["structure"]), "difficulties": lines(request.get("difficulties"), ["将三维结构、过程方向与机制证据对应"]),
-            "methods": lines(request.get("methods"), ["结构观察", "问题驱动", "同伴互评"]), "resources": request.get("resources") or "教材、3D教学示意模型、课堂任务单", "assessment": "；".join(assessment), "homework": homework, "phases": phases, "blackboard": data["map"], "slides": slides,
+            "methods": lines(request.get("methods"), ["问题锚点", "结构观察", "问题链", "同伴互评"]), "resources": request.get("resources") or "教材、3D教学示意模型、课堂任务单", "assessment": "；".join(assessment), "homework": homework, "phases": phases, "blackboard": data["map"], "boardDesign": data["map"] + ["证据链：已知 → 推断 → 待验证"], "abilityDifferentiation": ability_differentiation, "slides": slides,
             "materialCoverage": {"matched": bool(matched), "excerptCount": len(evidence), "note": "当前为可追溯摘录与内置模板组合；上传全文保留于教材面板，教师需核对专业表述。"},
-            "visualProfile": {"stage": "本科", "subject": "生物医学", "density": "balanced", "theme": "医学高对比", "visualLanguage": "器官标注、机制箭头、病例证据链、3D观察任务", "assetQueries": []}}
+            "visualProfile": {"stage": "本科", "subject": "生物医学", "density": "balanced", "theme": "医学高对比", "visualLanguage": "器官标注、机制箭头、病例证据链、3D观察任务", "assetQueries": [], "benchmark": benchmark},
+            "generationStandard": benchmark}

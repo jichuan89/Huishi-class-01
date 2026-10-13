@@ -216,6 +216,20 @@ for obj in parts:
 bpy.context.view_layer.objects.active = parts[0]
 bpy.ops.export_scene.gltf(filepath=config["outputPath"], export_format="GLB", use_selection=True, export_extras=True)
 bpy.ops.render.render(write_still=True)
+
+# Store standard rendered viewpoints for PPT/static courseware use. These are
+# renderer views of the generated mesh, not additional source-image views.
+view_directions = {
+    "front": Vector((0.15, -3.8, 0.55)),
+    "left": Vector((-3.8, -0.15, 0.55)),
+    "right": Vector((3.8, 0.15, 0.55)),
+    "back": Vector((0.15, 3.8, 0.55)),
+}
+for view_name, direction in view_directions.items():
+    camera.location = center + direction * extent
+    camera.rotation_euler = ((center - camera.location).to_track_quat("-Z", "Y").to_euler())
+    scene.render.filepath = config["viewPaths"][view_name]
+    bpy.ops.render.render(write_still=True)
 with open(config["partsPath"], "w", encoding="utf-8") as target:
     json.dump([{"name": obj.name, "partKey": obj["partKey"], "partLabel": obj["partLabel"], "source": obj["source"], "confidence": obj["confidence"], "vertexCount": obj["vertexCount"]} for obj in parts], target, ensure_ascii=False)
 '''
@@ -372,6 +386,18 @@ bpy.context.view_layer.objects.active = parts[0]
 bpy.ops.export_scene.gltf(filepath=config["outputPath"], export_format="GLB", use_selection=True, export_extras=True)
 bpy.ops.render.render(write_still=True)
 
+view_directions = {
+    "front": Vector((0.12, -3.6, 0.58)),
+    "left": Vector((-3.6, -0.12, 0.58)),
+    "right": Vector((3.6, 0.12, 0.58)),
+    "back": Vector((0.12, 3.6, 0.58)),
+}
+for view_name, direction in view_directions.items():
+    camera.location = center + direction * extent
+    camera.rotation_euler = ((center - camera.location).to_track_quat("-Z", "Y").to_euler())
+    scene.render.filepath = config["viewPaths"][view_name]
+    bpy.ops.render.render(write_still=True)
+
 with open(config["partsPath"], "w", encoding="utf-8") as target:
     json.dump([
         {
@@ -392,12 +418,19 @@ def _relative(path: Path) -> str:
     return str(path.relative_to(ROOT)).replace("\\", "/")
 
 
-def _urls(output_dir: Path, glb: Path, blend: Path | None, preview: Path | None):
+def _urls(output_dir: Path, glb: Path, blend: Path | None, preview: Path | None, view_images: dict[str, Path] | None = None):
     result = {
         "glbUrl": "/api/3d/download/" + _relative(glb).split("generated/", 1)[1],
         "blendUrl": "/api/3d/download/" + _relative(blend).split("generated/", 1)[1] if blend else "",
         "previewUrl": "/api/3d/preview/" + _relative(preview).split("generated/", 1)[1] if preview else "",
     }
+    if view_images:
+        result["viewImageUrls"] = {
+            name: "/api/3d/preview/" + _relative(path).split("generated/", 1)[1]
+            for name, path in view_images.items()
+            if path.is_file()
+        }
+        result["viewImageSource"] = "model-rendered-standard-views"
     return result
 
 
@@ -410,6 +443,7 @@ def _package_glb_partfield(glb_bytes: bytes, source_label: str, mode: str):
     output_path = run_dir / "model.glb"
     blend_path = run_dir / "model.blend"
     preview_path = run_dir / "preview.png"
+    view_paths = {name: run_dir / f"qa-{name}.png" for name in ("front", "left", "right", "back")}
     parts_path = run_dir / "parts.json"
     input_path.write_bytes(glb_bytes)
 
@@ -441,12 +475,13 @@ def _package_glb_partfield(glb_bytes: bytes, source_label: str, mode: str):
         "outputPath": str(output_path),
         "blendPath": str(blend_path),
         "previewPath": str(preview_path),
+        "viewPaths": {name: str(path) for name, path in view_paths.items()},
         "partsPath": str(parts_path),
     }, ensure_ascii=False), encoding="utf-8")
     runner_path.write_text(PARTFIELD_BLENDER_SCRIPT, encoding="utf-8")
     try:
         completed = subprocess.run([str(blender), "--background", "--factory-startup", "--python-exit-code", "1", "--python", str(runner_path), "--", "--config", str(config_path)], cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300, check=False)
-        if completed.returncode != 0 or not output_path.is_file() or not blend_path.is_file() or not preview_path.is_file():
+        if completed.returncode != 0 or not output_path.is_file() or not blend_path.is_file() or not preview_path.is_file() or not all(path.is_file() for path in view_paths.values()):
             (run_dir / "partfield_blender.log").write_text((completed.stdout or "") + "\n" + (completed.stderr or ""), encoding="utf-8")
             failed = {
                 **segmentation,
@@ -481,7 +516,7 @@ def _package_glb_partfield(glb_bytes: bytes, source_label: str, mode: str):
                 "warnings": warnings,
             },
             "workflow": ["partfield-local", "mesh-repair", "blender-assembly", "export-pipeline", "qa-review"],
-            **_urls(run_dir, output_path, blend_path, preview_path),
+            **_urls(run_dir, output_path, blend_path, preview_path, view_paths),
         }
     finally:
         config_path.unlink(missing_ok=True)
@@ -497,6 +532,7 @@ def _package_glb_legacy(glb_bytes: bytes, source_label: str, mode: str):
     output_path = run_dir / "model.glb"
     blend_path = run_dir / "model.blend"
     preview_path = run_dir / "preview.png"
+    view_paths = {name: run_dir / f"qa-{name}.png" for name in ("front", "left", "right", "back")}
     parts_path = run_dir / "parts.json"
     input_path.write_bytes(glb_bytes)
     blender = biomed_models.find_blender()
@@ -504,11 +540,11 @@ def _package_glb_legacy(glb_bytes: bytes, source_label: str, mode: str):
         return {"status": "uneditable", "editable": False, "message": "模型已生成，但未找到 Blender，暂不能拆分部件", "glbUrl": "", "blendUrl": "", "previewUrl": "", "parts": []}
     config_path = run_dir / "config.json"
     runner_path = run_dir / "runner.py"
-    config_path.write_text(json.dumps({"inputPath": str(input_path), "outputPath": str(output_path), "blendPath": str(blend_path), "previewPath": str(preview_path), "partsPath": str(parts_path), "sourceLabel": source_label}, ensure_ascii=False), encoding="utf-8")
+    config_path.write_text(json.dumps({"inputPath": str(input_path), "outputPath": str(output_path), "blendPath": str(blend_path), "previewPath": str(preview_path), "viewPaths": {name: str(path) for name, path in view_paths.items()}, "partsPath": str(parts_path), "sourceLabel": source_label}, ensure_ascii=False), encoding="utf-8")
     runner_path.write_text(BLENDER_SCRIPT, encoding="utf-8")
     try:
         completed = subprocess.run([str(blender), "--background", "--factory-startup", "--python-exit-code", "1", "--python", str(runner_path), "--", "--config", str(config_path)], cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300, check=False)
-        if completed.returncode != 0 or not output_path.is_file() or not blend_path.is_file() or not preview_path.is_file():
+        if completed.returncode != 0 or not output_path.is_file() or not blend_path.is_file() or not preview_path.is_file() or not all(path.is_file() for path in view_paths.values()):
             (run_dir / "blender.log").write_text((completed.stdout or "") + "\n" + (completed.stderr or ""), encoding="utf-8")
             return {"status": "failed", "editable": False, "message": "Blender 拆分失败，已保留生成日志", "glbUrl": "", "blendUrl": "", "previewUrl": "", "parts": []}
         parts = json.loads(parts_path.read_text(encoding="utf-8"))
@@ -521,7 +557,7 @@ def _package_glb_legacy(glb_bytes: bytes, source_label: str, mode: str):
             "parts": parts,
             "separation": {"status": "validated" if separable else "low_confidence", "partCount": len(parts), "warnings": warnings},
             "workflow": ["blender-director", "blender-modeler", "retopology", "materials", "asset-optimization", "export-pipeline", "qa-review"],
-            **_urls(run_dir, output_path, blend_path, preview_path),
+            **_urls(run_dir, output_path, blend_path, preview_path, view_paths),
         }
     finally:
         config_path.unlink(missing_ok=True)

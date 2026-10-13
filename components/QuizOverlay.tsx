@@ -1,25 +1,28 @@
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { ControlRefs } from '../types';
-import { createQuizSession, getQuizResult, QuizSession, QuizQuestion } from '../services/quizData';
+import type { HandTrackingStatus } from './HandController';
+import { createQuizSession, createQuizSessionFromQuestions, getQuizResult, QuizSession, QuizQuestion } from '../services/quizData';
 import { prepareXiaozhiSpeech, speakXiaozhi, stopXiaozhiSpeech } from '../services/xiaozhiSpeechService';
 import { X, Trophy, Star, Clock, CheckCircle2, XCircle, Zap, Sparkles, Loader2, SkipForward } from 'lucide-react';
 
 interface QuizOverlayProps {
-  stageRef: React.RefObject<HTMLElement>;
   controlRef: React.MutableRefObject<ControlRefs>;
   cameraActive: boolean;
+  trackingStatus: HandTrackingStatus;
+  onRetryGesture: () => void;
   onExit: () => void;
   subjectFilter?: string;
+  warmupQuestions?: QuizQuestion[];
   onComplete?: (result: ReturnType<typeof getQuizResult>, session: QuizSession) => void;
 }
 
 type QuizPhase = 'intro' | 'reading' | 'answering' | 'result' | 'summary';
 
 // ─── Component ───────────────────────────────────────────
-const QuizOverlay: React.FC<QuizOverlayProps> = ({ stageRef, controlRef, cameraActive, onExit, subjectFilter, onComplete }) => {
+const QuizOverlay: React.FC<QuizOverlayProps> = ({ controlRef, cameraActive, trackingStatus, onRetryGesture, onExit, subjectFilter, warmupQuestions, onComplete }) => {
   const [phase, setPhase] = useState<QuizPhase>('intro');
-  const [session, setSession] = useState<QuizSession>(() => createQuizSession(5, subjectFilter));
+  const [session, setSession] = useState<QuizSession>(() => warmupQuestions?.length ? createQuizSessionFromQuestions(warmupQuestions) : createQuizSession(5, subjectFilter));
   const [countdown, setCountdown] = useState(3);
   const [hoveredOption, setHoveredOption] = useState<number | null>(null);
   const [hoverProgress, setHoverProgress] = useState(0); // 0 to 1
@@ -39,6 +42,7 @@ const QuizOverlay: React.FC<QuizOverlayProps> = ({ stageRef, controlRef, cameraA
   }), []);
 
   const optionRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const overlayRef = useRef<HTMLDivElement>(null);
   const restartBtnRef = useRef<HTMLButtonElement>(null);
   const exitBtnRef = useRef<HTMLButtonElement>(null);
   const restartProgressRef = useRef<HTMLDivElement>(null);
@@ -135,30 +139,15 @@ const QuizOverlay: React.FC<QuizOverlayProps> = ({ stageRef, controlRef, cameraA
       if (cameraActive) {
         const handLm = controlRef.current.interactionHandLandmarks;
         if (handLm && handLm.length > 17) {
-          // A bent index finger is not a reliable pointer. Requiring an extended
-          // index prevents the palm/fingertips from selecting an answer while
-          // the user is moving their hand into position.
-          const wrist = handLm[0];
-          const indexTip = handLm[8];
-          const indexPip = handLm[6];
-          const tipDistance = Math.hypot(indexTip.x - wrist.x, indexTip.y - wrist.y);
-          const pipDistance = Math.hypot(indexPip.x - wrist.x, indexPip.y - wrist.y);
-          const isPointing = indexTip.y < indexPip.y - 0.01 || tipDistance > pipDistance * 1.08;
-          if (!isPointing) {
-            hitOption = null;
-            if (pointerRef.current) pointerRef.current.style.opacity = '0';
-            pointerStableRef.current.initialized = false;
-            pointerStableSinceRef.current = 0;
-          } else {
           // Use the index fingertip as the pointer; the palm center is too coarse for adjacent answers.
           const centerX = handLm[8].x;
           const centerY = handLm[8].y;
 
-          const stageEl = stageRef.current;
-          if (stageEl) {
-            const stageRect = stageEl.getBoundingClientRect();
-            let targetX = stageRect.left + (1 - centerX) * stageRect.width;
-            let targetY = stageRect.top + centerY * stageRect.height;
+          const overlayEl = overlayRef.current;
+          if (overlayEl) {
+            const overlayRect = overlayEl.getBoundingClientRect();
+            let targetX = overlayRect.left + (1 - centerX) * overlayRect.width;
+            let targetY = overlayRect.top + centerY * overlayRect.height;
             
             if (!pointerSmoothRef.current.initialized) {
               pointerSmoothRef.current.x = targetX;
@@ -189,10 +178,9 @@ const QuizOverlay: React.FC<QuizOverlayProps> = ({ stageRef, controlRef, cameraA
             }
             // Update virtual pointer position
             if (pointerRef.current) {
-              pointerRef.current.style.transform = `translate(${screenX}px, ${screenY}px)`;
+              pointerRef.current.style.transform = `translate(${screenX - overlayRect.left}px, ${screenY - overlayRect.top}px)`;
               pointerRef.current.style.opacity = '1';
             }
-          }
           }
         } else {
           if (pointerRef.current) pointerRef.current.style.opacity = '0';
@@ -235,8 +223,9 @@ const QuizOverlay: React.FC<QuizOverlayProps> = ({ stageRef, controlRef, cameraA
         } else if (candidateReady) {
           // Switched to a different option (or first hit)
           hoverOptionRef.current = hitOption;
-          // Require a short settle period after entering a new option.
-          hoverStartRef.current = performance.now() + 140;
+          // The pointer has already passed the stability gate above, so the
+          // visible countdown starts immediately and lasts exactly 1.2 seconds.
+          hoverStartRef.current = performance.now();
           lastProgressPctRef.current = 0;
           setHoveredOption(hitOption);
           setHoverProgress(0);
@@ -276,11 +265,11 @@ const QuizOverlay: React.FC<QuizOverlayProps> = ({ stageRef, controlRef, cameraA
           const centerX = handLm[8].x;
           const centerY = handLm[8].y;
 
-          const stageEl = stageRef.current;
-          if (stageEl) {
-            const stageRect = stageEl.getBoundingClientRect();
-            let targetX = stageRect.left + (1 - centerX) * stageRect.width;
-            let targetY = stageRect.top + centerY * stageRect.height;
+          const overlayEl = overlayRef.current;
+          if (overlayEl) {
+            const overlayRect = overlayEl.getBoundingClientRect();
+            let targetX = overlayRect.left + (1 - centerX) * overlayRect.width;
+            let targetY = overlayRect.top + centerY * overlayRect.height;
             
             if (!pointerSmoothRef.current.initialized) {
               pointerSmoothRef.current.x = targetX;
@@ -295,7 +284,7 @@ const QuizOverlay: React.FC<QuizOverlayProps> = ({ stageRef, controlRef, cameraA
             const screenY = pointerSmoothRef.current.y;
 
             if (pointerRef.current) {
-              pointerRef.current.style.transform = `translate(${screenX}px, ${screenY}px)`;
+              pointerRef.current.style.transform = `translate(${screenX - overlayRect.left}px, ${screenY - overlayRect.top}px)`;
               pointerRef.current.style.opacity = '1';
             }
 
@@ -551,12 +540,12 @@ const QuizOverlay: React.FC<QuizOverlayProps> = ({ stageRef, controlRef, cameraA
 
   // ─── Render ────────────────────────────────────────────
   return (
-    <div className="quiz-overlay">
+    <div ref={overlayRef} className="quiz-overlay">
       {/* Virtual Hand Pointer */}
       {cameraActive && (
         <div
           ref={pointerRef}
-          className="fixed top-0 left-0 w-8 h-8 pointer-events-none z-[9999] opacity-0 transition-opacity duration-200 ease-out"
+          className="absolute top-0 left-0 w-8 h-8 pointer-events-none z-[9999] opacity-0 transition-opacity duration-200 ease-out"
           style={{ willChange: 'transform', transform: 'translate(-100px, -100px)' }}
         >
           <div className="absolute -translate-x-1/2 -translate-y-1/2 flex items-center justify-center">
@@ -583,6 +572,17 @@ const QuizOverlay: React.FC<QuizOverlayProps> = ({ stageRef, controlRef, cameraA
           {voiceError}
         </div>
       )}
+
+      <div className={`quiz-tracking-status is-${trackingStatus.state}`} role="status">
+        <span>
+          {trackingStatus.state === 'starting' && '正在启动摄像头与手势识别…'}
+          {trackingStatus.state === 'ready' && '手势识别已就绪，请将食指放入画面'}
+          {trackingStatus.state === 'tracking' && '已识别手势 · 食指悬停 1.2 秒确认'}
+          {trackingStatus.state === 'no-hand' && '未检测到手，请将食指置于摄像头画面中'}
+          {trackingStatus.state === 'error' && `${trackingStatus.message}，可使用鼠标答题`}
+        </span>
+        {trackingStatus.state === 'error' && <button type="button" onClick={onRetryGesture}>重试手势</button>}
+      </div>
 
       {/* ─── INTRO PHASE ─── */}
       {phase === 'intro' && (
@@ -710,12 +710,12 @@ const QuizOverlay: React.FC<QuizOverlayProps> = ({ stageRef, controlRef, cameraA
           {/* Gesture hint */}
           {phase === 'answering' && cameraActive && (
             <div className="quiz-gesture-hint quiz-fade-in">
-              <span>☝ 用食指指向答案，稳定悬停 1.2 秒确认选择</span>
+              <span>用食指指向答案，稳定悬停 1.2 秒确认选择</span>
             </div>
           )}
           {phase === 'answering' && !cameraActive && (
             <div className="quiz-gesture-hint quiz-fade-in">
-              <span>💡 请开启摄像头使用手势答题，或直接点击选项</span>
+              <span>请开启摄像头使用手势答题，或直接点击选项</span>
             </div>
           )}
         </div>

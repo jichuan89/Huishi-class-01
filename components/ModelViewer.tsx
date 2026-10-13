@@ -1262,6 +1262,19 @@ const LayeredModel: React.FC<{ url: string; modelType: ModelType; assetUrls?: Re
       }
       configureModel(root, targetSize);
 
+      // Dual-layer heart exports retain the teaching anatomy in the file for
+      // Blender editing, but the current template is not suitable for normal
+      // classroom display. Keep every anatomy node hidden so only the SF3D
+      // appearance is rendered, including for models generated before the
+      // separate appearance URL was introduced.
+      root.traverse((object) => {
+        const isAnatomy = object.name === 'Anatomy'
+          || object.name.startsWith('Anatomy_')
+          || object.userData.layer === 'anatomy'
+          || object.userData.semantic === true;
+        if (isAnatomy) object.visible = false;
+      });
+
       if (isDiamondModel(url)) {
         enhanceDiamondModel(root);
       }

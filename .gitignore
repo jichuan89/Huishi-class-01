@@ -54,4 +54,6 @@ scripts/_dbg_*.py
 scripts/_probe_*.mjs
 scripts/_render_*.mjs
 output/
+outputs/
+check_plans.mjs
 public/models/*.original.glb

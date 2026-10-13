@@ -1,5 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { HandLandmarker, DrawingUtils } from '@mediapipe/tasks-vision';
+import { type PageDirection } from '../services/coursewareSwipe';
+import { CoursewareSwipeInput } from '../services/coursewareSwipeInput';
 import { ControlRefs, GestureType, HandLandmarkPoint, InteractionMode, MoveDirection } from '../types';
 import {
   describeHandCandidate,
@@ -33,12 +35,21 @@ export interface HandTrackingPerformanceSample {
   skippedFrames: number;
 }
 
+export type HandTrackingStatus =
+  | { state: 'starting' }
+  | { state: 'ready' }
+  | { state: 'tracking' }
+  | { state: 'no-hand' }
+  | { state: 'error'; message: string };
+
 interface HandControllerProps {
   controlRef: React.MutableRefObject<ControlRefs>;
   onStateChange: (gesture: GestureType, direction: MoveDirection, isDragging: boolean) => void;
   onPerformanceSample?: (sample: HandTrackingPerformanceSample) => void;
+  onTrackingStatusChange?: (status: HandTrackingStatus) => void;
   interactionMode: InteractionMode;
   quizMode?: boolean;  // 新增：是否处于答题模式
+  onPageSwipe?: (direction: PageDirection) => void;
 }
 
 // Simple Low-Pass Filter for smoothing coordinates
@@ -53,9 +64,7 @@ const toPointList = (landmarks: any[] | null | undefined): HandLandmarkPoint[] =
     z: landmark.z || 0,
   }));
 
-const toUserFacingHandedness = (categoryName: string) => (
-  categoryName === 'Left' ? 'Right' : 'Left'
-);
+const toUserFacingHandedness = (categoryName: string) => categoryName;
 
 const LOCAL_VISION_WASM_PATH = '/mediapipe/wasm';
 const LOCAL_HAND_MODEL_PATH = '/mediapipe/hand_landmarker.task';
@@ -96,13 +105,25 @@ const HandController: React.FC<HandControllerProps> = ({
   controlRef,
   onStateChange,
   onPerformanceSample,
+  onTrackingStatusChange,
   interactionMode,
   quizMode = false,
+  onPageSwipe,
 }) => {
+  const swipeRef = useRef(new CoursewareSwipeInput());
+  const pageSwipeCallbackRef = useRef(onPageSwipe);
+  const swipeDebugRef = useRef('');
+  useEffect(() => {
+    pageSwipeCallbackRef.current = onPageSwipe;
+    if (!onPageSwipe || quizMode) {
+      swipeRef.current.reset();
+    }
+  }, [onPageSwipe, quizMode]);
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const trackingStatusCallbackRef = useRef(onTrackingStatusChange);
   const handWorkerRef = useRef<Worker | null>(null);
   const workerReadyRef = useRef(false);
   const workerInitFailedRef = useRef(false);
@@ -121,10 +142,19 @@ const HandController: React.FC<HandControllerProps> = ({
   const drawingUtilsRef = useRef<DrawingUtils | null>(null);
   const targetTrackerRef = useRef(new HandTargetTracker());
   const trackingPhaseRef = useRef<HandTrackingPhase>('searching');
+  const quizHandPresentRef = useRef(false);
   const [trackingStatus, setTrackingStatus] = useState({
     phase: 'searching' as HandTrackingPhase,
     text: '请将双手置于画面中',
   });
+
+  useEffect(() => {
+    trackingStatusCallbackRef.current = onTrackingStatusChange;
+  }, [onTrackingStatusChange]);
+
+  const publishTrackingStatus = (status: HandTrackingStatus) => {
+    trackingStatusCallbackRef.current?.(status);
+  };
 
   // Keep latest callback to avoid stale closures in RAF loop
   const onStateChangeRef = useRef(onStateChange);
@@ -185,6 +215,7 @@ const HandController: React.FC<HandControllerProps> = ({
   // Keep latest quizMode to avoid stale closures in RAF loop
   useEffect(() => {
     quizModeRef.current = quizMode;
+    quizHandPresentRef.current = false;
     const trackerMode = quizMode || interactionModeRef.current === 'single' ? 'single' : 'dual';
     disarmResultWatchdog();
     // Drop any in-flight result belonging to the previous gesture mode.
@@ -375,6 +406,7 @@ const HandController: React.FC<HandControllerProps> = ({
       const now = performance.now();
       const age = now - lastResultReceivedAtRef.current;
       if (age >= RESULT_STALE_TIMEOUT_MS) {
+        swipeRef.current.reset();
         // Advance the accepted timestamp so a delayed in-flight frame from
         // before the timeout is discarded instead of resurrecting stale input.
         lastResultTimestampRef.current = Math.max(lastResultTimestampRef.current, now);
@@ -562,6 +594,7 @@ const HandController: React.FC<HandControllerProps> = ({
   useEffect(() => {
     let mounted = true;
     let mediaStream: MediaStream | null = null;
+    publishTrackingStatus({ state: 'starting' });
 
     const stopMediaStream = () => {
       mediaStream?.getTracks().forEach((track) => track.stop());
@@ -591,6 +624,7 @@ const HandController: React.FC<HandControllerProps> = ({
           const message = event.data;
           if (message.type === 'ready') {
             workerReadyRef.current = true;
+            publishTrackingStatus({ state: 'ready' });
             if (videoRef.current?.readyState && videoRef.current.readyState >= videoRef.current.HAVE_CURRENT_DATA) {
               startFrameScheduler();
             }
@@ -657,7 +691,9 @@ const HandController: React.FC<HandControllerProps> = ({
             stopMediaStream();
             stopHandWorker();
             console.error('MediaPipe worker error:', message.message);
-            setError('手势识别初始化失败，请刷新页面后重试');
+            const statusMessage = '手势识别初始化失败，请重试';
+            setError(statusMessage);
+            publishTrackingStatus({ state: 'error', message: statusMessage });
             setLoading(false);
           }
         };
@@ -669,7 +705,9 @@ const HandController: React.FC<HandControllerProps> = ({
           stopMediaStream();
           stopHandWorker();
           console.error('MediaPipe worker crashed:', event.message);
-          setError('手势识别线程异常，请刷新页面后重试');
+          const statusMessage = '手势识别线程异常，请重试';
+          setError(statusMessage);
+          publishTrackingStatus({ state: 'error', message: statusMessage });
           setLoading(false);
         };
         const numHands = quizModeRef.current || interactionModeRef.current === 'single' ? 1 : 2;
@@ -685,7 +723,9 @@ const HandController: React.FC<HandControllerProps> = ({
         stopFrameScheduler();
         stopMediaStream();
         stopHandWorker();
-        setError('当前浏览器不支持手势识别线程');
+        const statusMessage = '当前浏览器不支持手势识别线程';
+        setError(statusMessage);
+        publishTrackingStatus({ state: 'error', message: statusMessage });
         setLoading(false);
       }
     };
@@ -720,7 +760,9 @@ const HandController: React.FC<HandControllerProps> = ({
         stopFrameScheduler();
         stopMediaStream();
         stopHandWorker();
-        setError('无法访问摄像头，请检查摄像头权限（需 HTTPS/localhost）');
+        const statusMessage = '无法访问摄像头，请检查摄像头权限（需 HTTPS/localhost）';
+        setError(statusMessage);
+        publishTrackingStatus({ state: 'error', message: statusMessage });
         setLoading(false);
       }
     };
@@ -832,6 +874,16 @@ const HandController: React.FC<HandControllerProps> = ({
       });
       const trackerMode = quizModeRef.current || interactionModeRef.current === 'single' ? 'single' : 'dual';
       const trackedHands = targetTrackerRef.current.update(candidates, startTimeMs, trackerMode);
+      const rawQuizHandLandmarks = quizModeRef.current
+        ? (result.landmarks?.[0] ?? null)
+        : null;
+      if (quizModeRef.current) {
+        const handPresent = Boolean(rawQuizHandLandmarks?.length);
+        if (quizHandPresentRef.current !== handPresent) {
+          quizHandPresentRef.current = handPresent;
+          publishTrackingStatus(handPresent ? { state: 'tracking' } : { state: 'no-hand' });
+        }
+      }
       const leftHandCandidate = trackedHands.active.left;
       const rightHandCandidate = trackedHands.active.right;
       const leftHandStale = Boolean(leftHandCandidate?.stale);
@@ -849,6 +901,13 @@ const HandController: React.FC<HandControllerProps> = ({
       if (trackingPhaseRef.current !== trackedHands.phase) {
         trackingPhaseRef.current = trackedHands.phase;
         setTrackingStatus({ phase: trackedHands.phase, text: trackedHands.statusText });
+        if (!quizModeRef.current) {
+          publishTrackingStatus(
+            trackedHands.phase === 'locked' || trackedHands.phase === 'confirming' || trackedHands.phase === 'partial_lost'
+              ? { state: 'tracking' }
+              : { state: 'no-hand' },
+          );
+        }
       }
 
       if (ctx) {
@@ -871,13 +930,39 @@ const HandController: React.FC<HandControllerProps> = ({
       leftHandLandmarks = leftHandCandidate?.landmarks ?? null;
       rightHandLandmarks = rightHandCandidate?.landmarks ?? null;
 
+      let pageSwipeActive = false;
+      if (pageSwipeCallbackRef.current && !quizModeRef.current) {
+        const swipe = swipeRef.current.update(candidates, startTimeMs, (videoRef.current?.videoWidth || 640) / (videoRef.current?.videoHeight || 480));
+        pageSwipeActive = swipe.active;
+        if (import.meta.env.DEV) {
+          const state = `${swipe.phase}:${swipe.lockedDirection}:${swipe.reason}:${swipe.tracking}`;
+          if (state !== swipeDebugRef.current) {
+            console.debug('[courseware-swipe]', { at: startTimeMs, ...swipe });
+            swipeDebugRef.current = state;
+          }
+        }
+        if (swipe.direction) pageSwipeCallbackRef.current(swipe.direction);
+      }
+      if (pageSwipeActive) {
+        leftHandLandmarks = null;
+        smoothZoomRef.current = 0;
+        if (interactionModeRef.current === 'single') {
+          smoothRotVelRef.current = { x: 0, y: 0 };
+          rotationContinuityRef.current = createRotationContinuityState();
+          prevRotatePosRef.current = null;
+          prevRotateSampleAtRef.current = 0;
+          lastValidRotVelRef.current = { x: 0, y: 0 };
+        }
+      }
+
       if (trackedHands.controlEnabled) {
-        // Keep semantic aliases available for single-hand fallback logic.
-        const realLeftHandLandmarks = rightHandLandmarks;
-        const realRightHandLandmarks = leftHandLandmarks;
-        // Dual-hand behavior is mirrored in the current camera view.
-        const dualZoomHandLandmarks = rightHandLandmarks;
-        const dualManipulationHandLandmarks = leftHandLandmarks;
+        // MediaPipe handedness is the control contract. Mirroring is visual only.
+        const realLeftHandLandmarks = leftHandLandmarks;
+        const realRightHandLandmarks = rightHandLandmarks;
+        // Keep one consistent two-hand contract in every view: left zooms,
+        // while right controls model rotation and pinch-drag interactions.
+        const dualZoomHandLandmarks = leftHandLandmarks;
+        const dualManipulationHandLandmarks = rightHandLandmarks;
 
         const applySingleHandRotation = (landmarks: any[] | null) => {
           const continuity = advanceRotationContinuity(
@@ -1219,9 +1304,9 @@ const HandController: React.FC<HandControllerProps> = ({
 
       // 传递手部关节数据到3D场景
       const isSingleMode = quizModeRef.current || interactionModeRef.current === 'single';
-      const realLeftHandLandmarks = rightHandLandmarks;
-      const realRightHandLandmarks = leftHandLandmarks;
-      const dualManipulationHandLandmarks = leftHandLandmarks;
+      const realLeftHandLandmarks = leftHandLandmarks;
+      const realRightHandLandmarks = rightHandLandmarks;
+      const dualManipulationHandLandmarks = rightHandLandmarks;
       const activeSingleHandLandmarks = isSingleMode ? (realLeftHandLandmarks || realRightHandLandmarks) : null;
       const visibleLeftHandLandmarks = isSingleMode
         ? (activeSingleHandLandmarks === leftHandLandmarks ? leftHandLandmarks : null)
@@ -1230,7 +1315,7 @@ const HandController: React.FC<HandControllerProps> = ({
         ? (activeSingleHandLandmarks === rightHandLandmarks ? rightHandLandmarks : null)
         : rightHandLandmarks;
       const interactionHandLandmarks = isSingleMode
-        ? activeSingleHandLandmarks
+        ? (quizModeRef.current ? rawQuizHandLandmarks : activeSingleHandLandmarks)
         : dualManipulationHandLandmarks;
 
       // 手势位置数据始终更新（答题和非答题都需要）
