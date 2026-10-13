@@ -367,7 +367,10 @@ manifest.scenes.filter(s=>s.enabled!==false).forEach((s,i)=>stage.children[i]?.i
 def create_offline_zip(manifest):
     filename = f"{_safe_name(manifest.get('title'))}_interactive_{uuid.uuid4().hex[:8]}.zip"
     output = OUTPUT_DIR / filename
-    model_path = _resolve_model(manifest.get("model", {}).get("modelUrl", ""))
+    model = manifest.get("model") or {}
+    model_path = _resolve_model(model.get("exportModelUrl") or model.get("modelUrl", ""))
+    if any(scene.get("model") is not None and scene.get("enabled", True) for scene in manifest.get("scenes", [])) and not model_path:
+        raise ValueError("课件模型文件不可用，请重新连接模型后导出")
     viewer_script = PROJECT_ROOT / "node_modules" / "@google" / "model-viewer" / "dist" / "model-viewer-module.min.js"
     if not viewer_script.is_file():
         raise RuntimeError("离线运行时缺少 @google/model-viewer")
@@ -380,7 +383,7 @@ def create_offline_zip(manifest):
         if model_path:
             archive.write(model_path, "model.glb")
         archive.writestr("start-course.cmd", "@echo off\r\npy -3 serve.py\r\nif errorlevel 1 python serve.py\r\n")
-        archive.writestr("serve.py", "import http.server,webbrowser,threading\nthreading.Timer(1,lambda:webbrowser.open('http://127.0.0.1:8766')).start()\nhttp.server.ThreadingHTTPServer(('127.0.0.1',8766),http.server.SimpleHTTPRequestHandler).serve_forever()\n")
+        archive.writestr("serve.py", "import http.server,webbrowser,threading\nserver=http.server.ThreadingHTTPServer(('127.0.0.1',0),http.server.SimpleHTTPRequestHandler)\nthreading.Timer(1,lambda:webbrowser.open('http://127.0.0.1:'+str(server.server_port))).start()\nserver.serve_forever()\n")
         archive.writestr("README.txt", "双击 start-course.cmd 启动离线互动课件。内容用于教学，不用于临床诊断。\n")
     return output
 

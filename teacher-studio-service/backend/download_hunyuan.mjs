@@ -28,6 +28,10 @@ function download(url, tls12, redirects = 0) {
       response.on('error', reject);
       response.on('end', () => {
         const data = Buffer.concat(chunks);
+        if (process.env.HUNYUAN_DOWNLOAD_FORMAT === 'zip') {
+          if (data.length < 4 || data.toString('ascii', 0, 2) !== 'PK') return reject(new Error('Invalid OBJ archive'));
+          return resolve(data);
+        }
         if (data.length < 12 || data.toString('ascii', 0, 4) !== 'glTF' ||
             data.readUInt32LE(4) !== 2 || data.readUInt32LE(8) !== data.length) {
           return reject(new Error('Invalid or incomplete GLB'));
@@ -35,7 +39,7 @@ function download(url, tls12, redirects = 0) {
         resolve(data);
       });
     });
-    request.setTimeout(6000, () => request.destroy(new Error('Model download timed out')));
+    request.setTimeout(60000, () => request.destroy(new Error('Model download timed out')));
     request.on('error', reject);
   });
 }

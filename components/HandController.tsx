@@ -120,16 +120,6 @@ const HandController: React.FC<HandControllerProps> = ({
     }
   }, [onPageSwipe, quizMode]);
   const videoRef = useRef<HTMLVideoElement>(null);
-  // This project flips MediaPipe handedness for its legacy model controls.
-  // Semantic Right therefore corresponds to the raw Left hand used by the
-  // reference courseware swipe implementation.
-  const swipeRef = useRef(new CoursewareSwipeInput('Right'));
-  const pageSwipeCallbackRef = useRef(onPageSwipe);
-  const swipeDebugRef = useRef('');
-  useEffect(() => {
-    pageSwipeCallbackRef.current = onPageSwipe;
-    if (!onPageSwipe || quizMode) swipeRef.current.reset();
-  }, [onPageSwipe, quizMode]);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1041,14 +1031,17 @@ const HandController: React.FC<HandControllerProps> = ({
         }
       }
 
+      const isSingleMode = quizModeRef.current || interactionModeRef.current === 'single';
+      const realLeftHandLandmarks = leftHandLandmarks;
+      const realRightHandLandmarks = rightHandLandmarks;
+      const dualManipulationHandLandmarks = rightHandLandmarks;
+      const activeSingleHandLandmarks = isSingleMode ? (realLeftHandLandmarks || realRightHandLandmarks) : null;
+
       if (trackedHands.controlEnabled) {
         // MediaPipe handedness is the control contract. Mirroring is visual only.
-        const realLeftHandLandmarks = leftHandLandmarks;
-        const realRightHandLandmarks = rightHandLandmarks;
         // Keep one consistent two-hand contract in every view: left zooms,
         // while right controls model rotation and pinch-drag interactions.
         const dualZoomHandLandmarks = leftHandLandmarks;
-        const dualManipulationHandLandmarks = rightHandLandmarks;
 
         const applySingleHandRotation = (landmarks: any[] | null) => {
           const continuity = advanceRotationContinuity(
@@ -1529,11 +1522,6 @@ const HandController: React.FC<HandControllerProps> = ({
       }
 
       // 传递手部关节数据到3D场景
-      const isSingleMode = quizModeRef.current || interactionModeRef.current === 'single';
-      const realLeftHandLandmarks = leftHandLandmarks;
-      const realRightHandLandmarks = rightHandLandmarks;
-      const dualManipulationHandLandmarks = rightHandLandmarks;
-      const activeSingleHandLandmarks = isSingleMode ? (realLeftHandLandmarks || realRightHandLandmarks) : null;
       const visibleLeftHandLandmarks = isSingleMode
         ? (activeSingleHandLandmarks === leftHandLandmarks ? leftHandLandmarks : null)
         : leftHandLandmarks;

@@ -44,6 +44,7 @@ import ollama_adapter
 import partfield_adapter
 import triposr_local
 import teaching_benchmarks
+from express_model import obj_archive_to_glb
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -441,6 +442,16 @@ def hunyuan3d_config():
     )
 
 
+def hunyuan3d_model_config(requested_model=""):
+    base_url, default_key, default_model = hunyuan3d_config()
+    model = str(requested_model or default_model).strip()
+    if model == "hy-3d-express":
+        return base_url, env_value("HUNYUAN3D_EXPRESS_API_KEY", default_key), model
+    if model in ("hy-3d-3.0", "hy-3d-3.1"):
+        return base_url, default_key, model
+    raise ValueError("混元 3D 模型版本无效")
+
+
 def _hunyuan_json_request(path, payload, api_key, timeout=60):
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = Request(
@@ -466,7 +477,7 @@ def _hunyuan_json_request(path, payload, api_key, timeout=60):
     return result
 
 
-def _hunyuan_download_glb(url):
+def _hunyuan_download_glb(url, archive=False):
     parsed = urlparse(url)
     if parsed.scheme != 'https' or not parsed.hostname or not parsed.hostname.endswith(('.tencentcos.cn', '.myqcloud.com')) or parsed.username or parsed.password:
         raise RuntimeError('混元返回了非允许的模型下载地址，已阻止下载')
@@ -487,6 +498,8 @@ def _hunyuan_download_glb(url):
             # the body arrives. A fresh verified connection makes this recoverable.
             with urlopen(request, timeout=120, context=context) as response:
                 result = response.read()
+            if archive:
+                return obj_archive_to_glb(result)
             if len(result) < 12 or not result.startswith(b"glTF") or struct.unpack_from("<II", result, 4) != (2, len(result)):
                 raise RuntimeError("混元 3D 返回的文件不是完整有效的 GLB")
             return result
@@ -507,6 +520,7 @@ def _hunyuan_download_glb(url):
         native_environment = os.environ.copy()
         native_environment["HUNYUAN_DOWNLOAD_URL"] = url
         native_environment["HUNYUAN_DOWNLOAD_OUT"] = temporary_path
+        native_environment["HUNYUAN_DOWNLOAD_FORMAT"] = "zip" if archive else "glb"
         node = shutil.which("node.exe") or shutil.which("node")
         if not node:
             raise RuntimeError("未找到 Node.js，无法执行备用模型下载")
@@ -522,6 +536,8 @@ def _hunyuan_download_glb(url):
             result = Path(temporary_path).read_bytes()
         else:
             detail = (completed.stderr or completed.stdout or str(last_error)).strip()[-600:]
+            if archive:
+                raise RuntimeError("Express OBJ 下载失败，请重试以恢复已完成任务")
             # The provider output is still valid and signed. Let the browser
             # fetch it directly when this machine cannot reach the COS edge.
             return {"remoteUrl": url, "downloadError": detail}
@@ -530,6 +546,8 @@ def _hunyuan_download_glb(url):
     finally:
         if temporary_path:
             Path(temporary_path).unlink(missing_ok=True)
+    if archive:
+        return obj_archive_to_glb(result)
     if len(result) < 12 or not result.startswith(b"glTF") or struct.unpack_from("<II", result, 4) != (2, len(result)):
         raise RuntimeError("混元 3D 返回的文件不是完整有效的 GLB")
     return result
@@ -594,11 +612,9 @@ def _validate_hunyuan_image(image, label, max_encoded_bytes=6 * 1024 * 1024):
 
 
 def _generate_hunyuan3d(image, fields, view_label, multiview_images=None):
-    base_url, api_key, model = hunyuan3d_config()
+    base_url, api_key, model = hunyuan3d_model_config(fields.get("model") or fields.get("modelKey"))
     if not api_key:
         raise RuntimeError("未配置 HUNYUAN3D_API_KEY，无法调用混元 3D")
-    if model not in ('hy-3d-3.0', 'hy-3d-3.1'):
-        raise ValueError('混元模型版本无效')
     image_budget = 1_900_000 if multiview_images else 6 * 1024 * 1024
     encoded = _validate_hunyuan_image(image, view_label, max_encoded_bytes=image_budget)
     payload = {
@@ -646,11 +662,13 @@ def _generate_hunyuan3d(image, fields, view_label, multiview_images=None):
     if status != "completed":
         raise RuntimeError(f"混元 3D {view_label}任务返回未知状态：{status}")
     files = response.get("data") or []
-    glb = next((item for item in files if item.get("type") == "glb" and item.get("url")), None)
-    if not glb:
-        raise RuntimeError("混元 3D 任务完成，但响应中没有 GLB 文件")
-    task_path.write_text(json.dumps({"id": str(task_id), "model": model, "url": glb["url"]}), encoding="utf-8")
-    return _hunyuan_download_glb(glb["url"])
+    output = next((item for item in files if str(item.get("type", "")).lower() == "glb" and item.get("url")), None)
+    if output is None:
+        output = next((item for item in files if str(item.get("type", "")).lower() == "obj" and item.get("url")), None)
+    if output is None:
+        raise RuntimeError("混元 3D 任务完成，但未返回可用的 GLB 或 OBJ 文件")
+    task_path.write_text(json.dumps({"id": str(task_id), "model": model, "fingerprint": fingerprint, "url": output["url"]}), encoding="utf-8")
+    return _hunyuan_download_glb(output["url"], archive=str(output.get("type", "")).lower() == "obj")
 
 
 def _looks_like_heart(images):

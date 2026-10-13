@@ -18,6 +18,7 @@ const ACTIVITY_EVENT_TYPES = new Set([
   'xiaozhi.conversation',
   'gesture.part.move',
   'gesture.mode.switch',
+  'model.reset-disassembly',
 ]);
 
 const ACTIVITY_MODEL_SOURCES = new Map([
@@ -257,6 +258,15 @@ export function buildSemanticActivityLog(body) {
         action: body.type,
         description: `用户将手势交互模式切换为${modeLabel}模式`,
         payload: { mode: body.payload.mode },
+      };
+    }
+    case 'model.reset-disassembly': {
+      assertAllowedKeys(body.payload, ['modelName'], '模型复原事件参数');
+      const modelName = normalizeBoundedText(body.payload.modelName, MAX_ACTIVITY_MODEL_NAME_LENGTH, '模型名称');
+      return {
+        action: body.type,
+        description: `用户复原了 3D 模型“${modelName}”`,
+        payload: { modelName },
       };
     }
     default:

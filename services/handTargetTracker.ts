@@ -50,7 +50,7 @@ const DEFAULT_CONFIRMATION_MS = 600;
 // to drive the model indefinitely. This is separate from the UI lock phase.
 const DEFAULT_RELEASE_MS = 300;
 const DEFAULT_COOLDOWN_MS = 300;
-const MAX_PREDICTION_MS = 300;
+const MAX_PREDICTION_MS = 120;
 const MAX_CENTER_SPEED_PER_MS = 0.006;
 const HANDEDNESS_MISMATCH_PENALTY = 0.5;
 const PALM_POINTS = [0, 5, 9, 13, 17];

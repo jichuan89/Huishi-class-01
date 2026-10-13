@@ -1093,12 +1093,6 @@ const App: React.FC<DashboardProps> = ({ playIntro = true, initialLocalModelId, 
   // Loading progress timer for quiz button
   const quizProgressRef = useRef<HTMLDivElement>(null);
 
-  const openClassQuiz = () => {
-    if (classCourseware && classWarmupQuestions.length === 0) return;
-    setQuizSubjectFilter(modelUrl || undefined);
-    setQuizMode(true);
-  };
-
   useEffect(() => {
     if (!quizLaunchPending || !cameraActive || handTrackingStatus.state === 'starting') return;
     setQuizLaunchPending(false);

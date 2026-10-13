@@ -14,6 +14,10 @@ export type UserActivityEvent =
   | {
       type: 'gesture.mode.switch';
       payload: { mode: 'single' | 'dual' };
+    }
+  | {
+      type: 'model.reset-disassembly';
+      payload: { modelName: string };
     };
 
 type ActivityResponse = {
